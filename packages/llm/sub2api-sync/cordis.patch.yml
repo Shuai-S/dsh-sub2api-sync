@@ -1,0 +1,10 @@
+# Sub2API provider routes for the harness LLM seam.
+# One sub2api instance, one provider route per group. Groups, keys, and models
+# are synced from the sub2api panel/gateway into the `llm-pi-ai:` settings
+# section; routes register the moment the section lands.
+#
+# Does not override agent-default-model.
+
+- insert:
+    - id: sub2api-sync
+      name: '@deepseek-ai/dsh-sub2api-sync'
