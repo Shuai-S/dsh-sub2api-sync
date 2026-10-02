@@ -15,7 +15,15 @@
  */
 
 import type { CredentialsLike } from './types.ts'
-import { panelPasswordRef, panelRefreshRef, panelTokenRef } from './types.ts'
+import { panelPasswordRef, panelRefreshRef, panelTokenRef, oauthRefreshRef, oauthTokenRef } from './types.ts'
+import {
+  discoverOAuthEndpoints,
+  exchangeAuthorizationCode,
+  refreshAccessToken,
+  revokeToken,
+  type OAuthEndpoints,
+  type OAuthTokenPair,
+} from './oauth.ts'
 
 /** Loud panel failure with the HTTP status and envelope message attached. */
 export class PanelError extends Error {
@@ -52,6 +60,16 @@ export interface PanelKey {
   key?: string
   quota?: number
   expiresAt?: string
+}
+
+/** The signed-in account's panel identity (card header rendering). */
+export interface PanelProfile {
+  /** The account's set username, when one exists. */
+  username?: string
+  /** The account's email (raw — the caller masks it before display). */
+  email?: string
+  /** The account's balance in USD (profile `balance`; absent when not numeric). */
+  balance?: number
 }
 
 /** One page of the panel's native key listing. */
@@ -210,7 +228,7 @@ export class PanelClient {
     if (!response.ok) {
       if (looksLikeCaptcha(response.status, payload)) {
         const message = (payload as Envelope | undefined)?.message
-        throw Object.assign(new PanelError(response.status, `实例开启了人机验证（Turnstile/TCaptcha）——请改用「网页授权」或 PAT 通道`, 'captcha'), {
+        throw Object.assign(new PanelError(response.status, `实例开启了人机验证（Turnstile/TCaptcha）——请改用「网页授权」通道`, 'captcha'), {
           kind: 'captcha',
           detail: typeof message === 'string' ? message : undefined,
         })
@@ -308,9 +326,58 @@ export class PanelClient {
   async deleteKey(token: string, id: number): Promise<void> {
     await this.call(token, 'DELETE', `/keys/${id}`)
   }
+
+  /**
+   * Controlled plaintext reveal for one client-owned relay key (OAuth only):
+   * the regular OAuth list/get answers are masked, this endpoint is the
+   * documented exception — same ownership checks server-side, audited.
+   */
+  async revealKey(token: string, id: number): Promise<PanelKey> {
+    const payload = await this.call(token, 'POST', `/keys/${id}/reveal`)
+    const key = readKey(payload)
+    if (key === undefined) throw new PanelError(500, 'reveal 响应形状异常')
+    return key
+  }
+
+  /**
+   * The signed-in account's panel identity via the OAuth userinfo endpoint
+   * (`GET /auth/me`, scope `profile` — the plugin always requests it). The
+   * richer `/user/profile` sits OUTSIDE the OAuth token's path whitelist
+   * (`requiredOAuthScope`: only /auth/me, /groups/*, /keys/*) and answers
+   * 403 INSUFFICIENT_SCOPE for OAuth sessions. Fields: username, email,
+   * balance — all optional.
+   */
+  async getProfile(token: string): Promise<PanelProfile> {
+    const payload = await this.call(token, 'GET', '/auth/me')
+    if (payload === null || typeof payload !== 'object') throw new PanelError(500, 'profile 响应形状异常')
+    const data = payload as Record<string, unknown>
+    const pick = (key: string): string | undefined => {
+      const value = data[key]
+      return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+    }
+    const balance = data.balance
+    return {
+      username: pick('username'),
+      email: pick('email'),
+      ...(typeof balance === 'number' && Number.isFinite(balance) ? { balance } : {}),
+    }
+  }
+
+  /** OAuth token exchange against the discovered provider (host-side only). */
+  async oauthTokenExchange(
+    endpoints: OAuthEndpoints,
+    input: { code: string; redirectUri: string; verifier: string },
+  ): Promise<OAuthTokenPair> {
+    return exchangeAuthorizationCode(endpoints, input, this.fetchImpl)
+  }
+
+  /** OAuth discovery passthrough for route handlers that need endpoints. */
+  async discoverOAuth(): Promise<OAuthEndpoints> {
+    return discoverOAuthEndpoints(this.baseURL, this.fetchImpl)
+  }
 }
 
-export type AuthKind = 'none' | 'pat' | 'panel'
+export type AuthKind = 'none' | 'panel' | 'oauth'
 
 export interface AuthState {
   signedIn: boolean
@@ -319,7 +386,7 @@ export interface AuthState {
 }
 
 /**
- * Credential-backed gateway over {@link PanelClient}: stores login/PAT
+ * Credential-backed gateway over {@link PanelClient}: stores login
  * tokens, classifies the auth kind, and wraps authed calls with a
  * single-flight 401 → refresh → retry.
  */
@@ -329,12 +396,21 @@ export class PanelGateway {
   private readonly fetchImpl?: typeof fetch
   private pending2FA?: { tempToken: string; email: string }
   private refreshInFlight?: Promise<string>
+  private oauthRefreshInFlight?: Promise<string>
 
-  constructor(options: { baseURL: string | (() => string); credentials: CredentialsLike; fetchImpl?: typeof fetch }) {
+  constructor(options: { baseURL: string | (() => string); credentials: CredentialsLike; fetchImpl?: typeof fetch; onAuthLost?: () => void }) {
     this.baseURLSource = options.baseURL
     this.credentials = options.credentials
     this.fetchImpl = options.fetchImpl
+    this.onAuthLost = options.onAuthLost
   }
+
+  /**
+   * Fired when the panel session is definitively gone — no refresh token, or
+   * the refresh call itself was refused. Never on network failures. The host
+   * hooks this to purge the site's sync state (logout/expiry policy).
+   */
+  private readonly onAuthLost?: () => void
 
   /** The instance address, re-read per call so a baseURL edit takes effect. */
   private get baseURL(): string {
@@ -353,13 +429,23 @@ export class PanelGateway {
     return panelRefreshRef(this.baseURL)
   }
 
+  private oauthAccessRef(): string {
+    return oauthTokenRef(this.baseURL)
+  }
+
+  private oauthRefresh(): string {
+    return oauthRefreshRef(this.baseURL)
+  }
+
   /** Current auth state; email rides the caller's config, not credentials. */
   async authState(email?: string): Promise<AuthState> {
+    const oauthAccess = await this.credentials.resolve(this.oauthAccessRef())
+    if (oauthAccess !== undefined && oauthAccess.value.length > 0) {
+      return { signedIn: true, kind: 'oauth', ...(email !== undefined && email.length > 0 ? { email } : {}) }
+    }
     const access = await this.credentials.resolve(this.tokenRef())
     if (access === undefined || access.value.length === 0) return { signedIn: false, kind: 'none' }
-    const refresh = await this.credentials.resolve(this.refreshRef())
-    const kind: AuthKind = refresh !== undefined && refresh.value.length > 0 ? 'panel' : 'pat'
-    return { signedIn: true, kind, ...(email !== undefined && email.length > 0 ? { email } : {}) }
+    return { signedIn: true, kind: 'panel', ...(email !== undefined && email.length > 0 ? { email } : {}) }
   }
 
   /** Password login; stores the pair and the password for silent re-login. */
@@ -383,29 +469,35 @@ export class PanelGateway {
     this.pending2FA = undefined
   }
 
-  /** Validate and store a PAT; returns the groups it can see. */
-  async setPat(token: string): Promise<PanelGroup[]> {
-    const groups = await this.client().listAvailableGroups(token)
-    await this.credentials.set(this.tokenRef(), token)
-    await this.credentials.unset(this.refreshRef())
-    return groups
-  }
-
-  /** Sign out: drop panel tokens (the stored password stays for re-login). */
+  /** Sign out: revoke OAuth tokens server-side when present, then drop both channels' secrets. */
   async logout(): Promise<void> {
+    await this.oauthSignOut()
     await this.credentials.unset(this.tokenRef())
     await this.credentials.unset(this.refreshRef())
     this.pending2FA = undefined
   }
 
   /**
-   * Run one authed panel call. A 401 triggers a single-flight refresh and
-   * exactly one retry; a failed refresh drops both tokens and fails loud.
+   * Run one authed panel call. Tokens resolve per channel — OAuth access
+   * token first, then the panel JWT — and a 401 triggers a single-flight
+   * refresh (channel-appropriate) and exactly one retry before failing loud.
    */
   async use<T>(fn: (panel: PanelClient, token: string) => Promise<T>): Promise<T> {
+    const oauthAccess = await this.credentials.resolve(this.oauthAccessRef())
+    if (oauthAccess !== undefined && oauthAccess.value.length > 0) {
+      const panel = this.client()
+      try {
+        return await fn(panel, oauthAccess.value)
+      } catch (error) {
+        const status = error instanceof PanelError ? error.status : undefined
+        if (status !== 401) throw error
+        const token = await this.refreshOAuthSingleFlight()
+        return await fn(panel, token)
+      }
+    }
     const access = await this.credentials.resolve(this.tokenRef())
     if (access === undefined || access.value.length === 0) {
-      throw new Error('sub2api-sync: 尚未登录 sub2api 面板——请先在设置卡完成登录或粘贴 PAT')
+      throw new Error('sub2api-sync: 尚未登录 sub2api 面板——请先在设置卡完成登录')
     }
     const panel = this.client()
     try {
@@ -415,6 +507,62 @@ export class PanelGateway {
       if (status !== 401) throw error
       const token = await this.refreshSingleFlight()
       return await fn(panel, token)
+    }
+  }
+
+  /** Store the pair from a completed browser authorization (C2). */
+  async storeOAuthTokens(pair: OAuthTokenPair): Promise<void> {
+    await this.credentials.set(this.oauthAccessRef(), pair.accessToken)
+    if (pair.refreshToken !== undefined) {
+      await this.credentials.set(this.oauthRefresh(), pair.refreshToken)
+    } else {
+      await this.credentials.unset(this.oauthRefresh())
+    }
+  }
+
+  /** Revoke OAuth tokens at the provider (best effort) and drop the stored secrets. */
+  async oauthSignOut(): Promise<void> {
+    const access = await this.credentials.resolve(this.oauthAccessRef())
+    const refresh = await this.credentials.resolve(this.oauthRefresh())
+    if (access !== undefined || refresh !== undefined) {
+      try {
+        const endpoints = await discoverOAuthEndpoints(this.baseURL, this.fetchImpl)
+        if (refresh !== undefined) await revokeToken(endpoints, refresh.value, this.fetchImpl)
+        if (access !== undefined) await revokeToken(endpoints, access.value, this.fetchImpl)
+      } catch {
+        // Revocation is best effort: dropping the local secrets always wins.
+      }
+    }
+    await this.credentials.unset(this.oauthAccessRef())
+    await this.credentials.unset(this.oauthRefresh())
+  }
+
+  /** Single-flight OAuth refresh (rotating); concurrent 401s share one wire call. */
+  private refreshOAuthSingleFlight(): Promise<string> {
+    this.oauthRefreshInFlight ??= this.refreshOAuth().finally(() => {
+      this.oauthRefreshInFlight = undefined
+    })
+    return this.oauthRefreshInFlight
+  }
+
+  private async refreshOAuth(): Promise<string> {
+    const stored = await this.credentials.resolve(this.oauthRefresh())
+    if (stored === undefined || stored.value.length === 0) {
+      await this.credentials.unset(this.oauthAccessRef())
+      this.onAuthLost?.()
+      throw new Error('sub2api-sync: OAuth 登录已过期且无 refresh token——请重新进行网页授权')
+    }
+    try {
+      const endpoints = await discoverOAuthEndpoints(this.baseURL, this.fetchImpl)
+      const pair = await refreshAccessToken(endpoints, stored.value, this.fetchImpl)
+      await this.storeOAuthTokens(pair)
+      return pair.accessToken
+    } catch (error) {
+      await this.credentials.unset(this.oauthAccessRef())
+      await this.credentials.unset(this.oauthRefresh())
+      this.onAuthLost?.()
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new Error(`sub2api-sync: OAuth 登录已过期且刷新失败——请重新进行网页授权（${reason}）`)
     }
   }
 
@@ -430,6 +578,7 @@ export class PanelGateway {
     const stored = await this.credentials.resolve(this.refreshRef())
     if (stored === undefined || stored.value.length === 0) {
       await this.credentials.unset(this.tokenRef())
+      this.onAuthLost?.()
       throw new Error('sub2api-sync: 登录已过期且无 refresh token——请重新登录')
     }
     try {
@@ -439,6 +588,7 @@ export class PanelGateway {
     } catch (error) {
       await this.credentials.unset(this.tokenRef())
       await this.credentials.unset(this.refreshRef())
+      this.onAuthLost?.()
       const reason = error instanceof Error ? error.message : String(error)
       throw new Error(`sub2api-sync: 登录已过期且刷新失败——请重新登录（${reason}）`)
     }

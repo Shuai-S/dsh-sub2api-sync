@@ -10,15 +10,32 @@ Phase 1 ships the key-first path: declare groups by hand in the settings card, p
 
 ## Install
 
+The harness loads this package through its `main`/`exports` entry, which is the
+**built** `lib/index.js` (`lib/` is gitignored and is not checked in). Build it
+first, or the loader reports `failed to import` / `did not activate` and the
+plugin never starts:
+
+```sh
+pnpm install          # installs deps (runs the `prepare` build)
+pnpm build            # tsdown + client wrapper; emits lib/index.js and lib/client.js
+```
+
+Then link it into a profile. `dsh plugin add` only symlinks the directory
+(`link:`); it does **not** install or build the target, so the two commands
+above are a hard precondition — not just a development convenience:
+
 ```sh
 dsh plugin --profile web add ./packages/llm/sub2api-sync
 ```
 
-or from a published package once released:
+or from a published package once released (a tarball ships `lib/` already):
 
 ```sh
 dsh plugin --profile web add @deepseek-ai/dsh-sub2api-sync
 ```
+
+After rebuilding, restart the app or toggle the plugin off/on so the entry is
+imported again; a failed entry is not retried on its own.
 
 ## Configuration
 
@@ -53,24 +70,26 @@ For every declared group with a stored key, the engine:
 1. calls `GET {instance}/v1/models` with that group's key (falling back to `modelListOverrides` on failure);
 2. maps the group's platform onto a wire protocol — `anthropic` → `anthropic-messages`, the OpenAI family (`openai`/`grok`/`kimi`/`zhipu`/`deepseek`) → `openai-responses`, the rest (`gemini`/`antigravity`/`composite`) → `openai-completions` — overridable per group;
 3. derives the profile `baseURL` per protocol (OpenAI-family SDKs get `{instance}/v1`; the Anthropic SDK gets the bare host, since it appends `/v1/messages` itself);
-4. writes a hand-declared `llm-pi-ai` provider profile at `providers.sub2api-<group-id>` through a scoped `settings.mutate` carrying `expectedRevision` (three conflict-retry attempts), with a lenient retry policy (5 retries / 120 s backoff cap) tuned for proxied upstream 429 windows.
+4. writes a hand-declared `llm-pi-ai` provider profile at `providers.sub2api-<10-hex>` through a scoped `settings.mutate` carrying `expectedRevision` (three conflict-retry attempts), with a lenient retry policy (5 retries / 120 s backoff cap) tuned for proxied upstream 429 windows.
 
-Routes take effect on the next request. Entries only ever cover the `sub2api-<digits>` shape — the ownership boundary. Anything else in `llm-pi-ai.providers` (your hand-entered routes, other plugins' routes) is never touched. Groups that disappear from the config lose their entry and their credential; the remote key itself is only revoked when `deleteOrphanKeys` is enabled (Phase 2 enforcement).
+Routes take effect on the next request. The route suffix is a SHA-256 truncation over (instance baseURL, panel key id) — stable, collision-free across instances, and it deliberately carries no trace of the panel's sequential key numbering (a shared config screenshot reveals nothing about how many keys the site has issued). Entries only ever cover the `sub2api-<10-hex>` (current) and `sub2api-<digits>` (legacy, migrated on the next sync) shapes — the ownership boundary. Anything else in `llm-pi-ai.providers` (your hand-entered routes, other plugins' routes) is never touched. Keys that disappear from the selection lose their entry and their credential; the remote key itself is only revoked when `deleteOrphanKeys` is enabled. Each **registered-route row** in the sync card carries a **Remove** button — it deletes the local route and credential only (**no panel calls**, so it works even with an empty balance) and unchecks the key so the next sync cannot resurrect it; the report below stays a read-only hint of the last run. Logout, definitive auth loss, and instance switches purge the plugin's sync state site-wide — owned routes, relay-key credentials, and the last sync report go together (a report describing state that no longer exists must not keep rendering).
 
 ## Model Experience
 
-- **Context blocks (short form)**: one provider per sub2api group, one relay key per provider, model catalog discovered from the instance; per-model `compat`/`reasoningEfforts` inherit the user template. Capacity fields (context window, max tokens) default to 128000/8192 at route level until the models.dev enrichment (Phase 2) fills real values; models are declared text-only until then.
-- Model ids come verbatim from the instance; the display name is the group name (fallback `Group <id>`).
+- **Context blocks (short form)**: one provider per sub2api group, one relay key per provider, model catalog discovered from the instance; per-model `compat` inherits the user template. Reasoning efforts (`reasoningEfforts`) follow an explicit template when set (including `false`), and otherwise auto-fill per model from the models.dev enrichment.
+- **Reasoning-effort auto-fill**: the models.dev `reasoning_options` effort enumeration maps onto pi-ai's `reasoningEfforts` (`none` → `off: null`, same-name passthrough otherwise). Merging is first-party first: a vendor-official entry (openai/anthropic/google/zhipuai/zai/deepseek/moonshotai/xai/alibaba, vendor-governed cloud hosting) wins outright — including when it carries no effort data (budget-only claude/gemini), which silences aggregator-invented vocabularies; with no first-party entry, aggregator sources intersect. Toggle/budget-only reasoning (claude, gemini, deepseek-v3.2, kimi-k2.x) has no effort-string wire shape and stays template/`compat`-owned.
+- **Display-name enrichment**: the models.dev `name` lands on each pi-ai model entry's `name` field — the display name the model selector and the model-catalog editor (显示名称 column) show. The models.dev " (latest)" family marker is stripped, a name repeating the id is dropped, merging is first-party first (official name overrides, aggregator names fill absences), and a name can be an id's only enriched fact.
+- Model ids come verbatim from the instance; the provider display name is the `providerNameTemplate` rendering of the key name (fallback `Group <id>`).
 
 ## Known Limitations and Deferred Work
 
 - **No invariant surface**: this package publishes no `./invariant`. It has no owned relation whose independent observations can diverge — the sync is a settings write with the result readable back from the same service that accepted it.
 - Mode A (panel login, 2FA, automatic key creation, group discovery) is Phase 2; until then groups are declared by hand (paste a key — that's all).
 - The relay key cannot be reverse-mapped to its group: `/v1/sub2api/billing` and `/v1/usage` carry no group id/name/platform. The card never asks for a group id — the route name derives from the key's FNV-1a fingerprint (`sub2api-<fingerprint>`, idempotent re-add per key); the platform is guessed from the model list (manual override available); a subscription group's name is backfilled from `/v1/usage` `planName`.
-- Capacity metadata (context window, max output, image input) is route-level default until Phase 2's models.dev enrichment; expect generous defaults rather than exact figures.
+- Capacity metadata (context window, max output, image input) follows the models.dev enrichment, with route-level defaults for ids the catalog does not know — expect generous defaults rather than exact figures for unmatched models.
 - Usage lookup (`GET /v1/usage`) is a decided non-goal — consult the sub2api console.
 - The panel API is a private frontend contract without a stability promise; responses are validated for required fields and fail loudly with context.
-- Coexistence with the community plugin `GodD6366/dsh-sub2api`: route names do not collide (ours are `sub2api-<digits>`), but each plugin manages its own entries and credential refs — do not expect shared state.
+- Coexistence with the community plugin `GodD6366/dsh-sub2api`: route names do not collide (ours are `sub2api-<10-hex>` slugs, plus legacy `sub2api-<digits>` cleanup), but each plugin manages its own entries and credential refs — do not expect shared state.
 - Requires a dsh release where `dsh-llm-pi-ai` attaches zero usage to replayed assistant messages (multi-turn pi-ai crash fixed on current master / the 0.1.2-rc.1 line).
 - REAL composition, disposal, and snapshot tests against a live harness composition are pending; Phase 1 is verified by unit tests plus a live smoke test.
 

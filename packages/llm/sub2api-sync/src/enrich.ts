@@ -1,6 +1,7 @@
 /**
- * Model-metadata enrichment (C4): fills per-model capacity facts the sub2api
- * gateway never reports — context window, max output tokens, image input —
+ * Model-metadata enrichment (C4): fills per-model facts the sub2api gateway
+ * never reports — context window, max output tokens, image input, and the
+ * reasoning-effort levels (`reasoning_options` → pi-ai `reasoningEfforts`) —
  * from the models.dev catalog (https://models.dev/api.json).
  *
  * Source chain, in order:
@@ -24,10 +25,20 @@ import { fileURLToPath } from 'node:url'
 
 /** Per-model capacity facts the enrichment can contribute. */
 export interface ModelMeta {
+  /** Display name for selectors (models.dev `name`), e.g. "Claude Opus 4.5". */
+  name?: string
   contextWindow?: number
   maxTokens?: number
   imageInput?: boolean
   reasoningModel?: boolean
+  /**
+   * pi-ai `reasoningEfforts` map derived from the models.dev `reasoning_options`
+   * effort values: keys are pi-ai thinking levels, values the wire spelling
+   * (same-name passthrough; `none` maps to `off: null` — dispatch sends nothing).
+   * Absent for toggle/budget-only reasoning, whose wire shape is not an effort
+   * string and cannot travel through `reasoningEfforts`.
+   */
+  reasoningEfforts?: Record<string, string | null>
 }
 
 /** Model id (lowercase) → metadata. */
@@ -37,9 +48,131 @@ const SNAPSHOT_PATH = join(dirname(fileURLToPath(import.meta.url)), '../data/mod
 const SOURCE_URL = 'https://models.dev/api.json'
 const TTL = 24 * 60 * 60 * 1000
 
+/**
+ * pi-ai's `THINKING_LEVELS` vocabulary (dsh-llm-pi-ai: off/minimal/low/medium/
+ * high/xhigh/max) extended with models.dev's `none` spelling for `off`. models.dev
+ * effort values outside this set cannot travel through `reasoningEfforts` and are
+ * dropped. Canonical order doubles as the output order. Exported for the
+ * snapshot generator script (`scripts/fetch-models-dev.mjs`), which mirrors
+ * {@link parseCatalog}'s efforts transform.
+ */
+export const EFFORT_VOCABULARY = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/**
+ * models.dev provider keys that publish the upstream's own effort surface —
+ * vendor consoles and vendor-governed cloud hosting. Aggregator entries invent
+ * richer vocabularies than the upstream accepts (claude with `xhigh`/`max`,
+ * glm-5.2 with seven levels), and a synced group forwards to the vendor
+ * upstream, so when any first-party entry exists for an id it wins outright and
+ * aggregator effort data is ignored; without one, aggregator sources intersect
+ * (a level every source claims — never more than any one of them offers).
+ * Exported for the snapshot generator script (single source of truth with
+ * {@link parseCatalog}).
+ */
+export const FIRST_PARTY_PROVIDERS: Set<string> = new Set([
+  // Vendor consoles.
+  'openai', 'anthropic', 'google', 'deepseek', 'xai',
+  'moonshotai', 'moonshotai-cn', 'kimi-code-plan-cn', 'kimi-code-plan-global',
+  'zhipuai', 'zhipuai-coding-plan', 'zai', 'zai-coding-plan',
+  'alibaba', 'alibaba-cn', 'alibaba-coding-plan', 'alibaba-coding-plan-cn',
+  'alibaba-token-plan', 'alibaba-token-plan-cn',
+  'minimax', 'minimax-cn', 'minimax-coding-plan', 'minimax-cn-coding-plan',
+  'stepfun', 'stepfun-ai', 'stepfun-step-plan', 'stepfun-ai-step-plan',
+  'xiaomi', 'xiaomi-token-plan-ams', 'xiaomi-token-plan-cn', 'xiaomi-token-plan-sgp',
+  'longcat', 'volcengine', 'volcengine-coding-plan',
+  'tencent-coding-plan', 'tencent-token-plan', 'tencent-tokenhub',
+  'mistral', 'cohere', 'ai21', 'upstage', 'sarvam',
+  // First-party cloud hosting (same upstream surface, vendor-governed).
+  'google-vertex', 'google-vertex-anthropic', 'amazon-bedrock',
+  'azure', 'azure-cognitive-services', 'snowflake-cortex', 'watsonx', 'github-copilot',
+])
+
 interface Cache {
   index: ModelMetaIndex
   at: number
+}
+
+/**
+ * One model's effort levels from `reasoning_options`, normalized to the
+ * vocabulary in canonical order (`none` kept — it becomes pi-ai's `off`).
+ * `undefined` when the entry carries no effort options: toggle/budget-only
+ * reasoning cannot travel through `reasoningEfforts` (its wire shape is a
+ * boolean flag or a numeric budget, not an effort string).
+ */
+function effortLevelsOf(model: Record<string, unknown>): string[] | undefined {
+  const options = model.reasoning_options
+  if (!Array.isArray(options)) return undefined
+  const seen = new Set<string>()
+  for (const option of options) {
+    if (option === null || typeof option !== 'object') continue
+    const record = option as Record<string, unknown>
+    if (record.type !== 'effort' || !Array.isArray(record.values)) continue
+    for (const value of record.values) {
+      if (typeof value === 'string' && (EFFORT_VOCABULARY as readonly string[]).includes(value)) {
+        seen.add(value)
+      }
+    }
+  }
+  if (seen.size === 0) return undefined
+  return EFFORT_VOCABULARY.filter((level) => seen.has(level))
+}
+
+/**
+ * Build the pi-ai `reasoningEfforts` map from normalized levels: same-name
+ * passthrough (pi-ai's default wire spelling), `none` → `off: null` (dispatch
+ * sends nothing). `undefined` when nothing remains beyond `off` — pi-ai rejects
+ * a map that offers no thinking level.
+ */
+function reasoningEffortsOf(levels: readonly string[]): Record<string, string | null> | undefined {
+  const map: Record<string, string | null> = {}
+  let beyondOff = false
+  for (const level of levels) {
+    if (level === 'none') map.off = null
+    else {
+      map[level] = level
+      beyondOff = true
+    }
+  }
+  return beyondOff ? map : undefined
+}
+
+/**
+ * Normalize one models.dev `name` into a display name: strip the trailing
+ * " (latest)" marker (a models.dev family-latest convention, not part of the
+ * model's name) and reject empty results or names that merely repeat the id —
+ * a display name identical to the id carries no information and the UI keeps
+ * its own placeholder in that case. Exported for the snapshot generator
+ * script (single source of truth with {@link parseCatalog}).
+ */
+export function displayNameOf(raw: unknown, id?: string): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const name = raw.trim().replace(/\s*\(latest\)$/i, '').trim()
+  if (name.length === 0) return undefined
+  if (id !== undefined && name.toLowerCase() === id.toLowerCase()) return undefined
+  return name
+}
+
+/** Defensive snapshot re-normalization (already normalized by the generator). */
+function effortsMetaOf(levels: unknown): Record<string, string | null> | undefined {
+  if (!Array.isArray(levels)) return undefined
+  const normalized = EFFORT_VOCABULARY.filter((level) => levels.includes(level))
+  return reasoningEffortsOf(normalized)
+}
+
+/** Levels every source claims, in canonical order; empty when they disagree. */
+function intersectLevels(sources: readonly (readonly string[])[]): string[] {
+  if (sources.length === 0) return []
+  const [first, ...rest] = sources
+  return first.filter((level) => rest.every((source) => source.includes(level)))
+}
+
+/** Attach the resolved efforts map to an id's meta, creating the entry if new. */
+function attachEfforts(index: ModelMetaIndex, key: string, sources: readonly (readonly string[])[]): void {
+  const map = reasoningEffortsOf(intersectLevels(sources))
+  if (map === undefined) return
+  const meta = index.get(key) ?? {}
+  meta.reasoningEfforts = map
+  index.set(key, meta)
 }
 
 let networkCache: Cache | undefined
@@ -47,7 +180,10 @@ let bundledCache: ModelMetaIndex | undefined
 
 /**
  * Parse the bundled tuple snapshot:
- * `{ generatedAt, source, models: { [id]: [context, output, image, reasoning] } }`.
+ * `{ generatedAt, source, models: { [id]: [context, output, image, reasoning, efforts?, name?] } }`
+ * — the fifth element (optional, 4-tuples predate the efforts enrichment) is the
+ * normalized effort-level array the generator script resolved, the sixth
+ * (optional) the display name.
  */
 export function parseSnapshot(raw: string): ModelMetaIndex {
   const index: ModelMetaIndex = new Map()
@@ -61,12 +197,15 @@ export function parseSnapshot(raw: string): ModelMetaIndex {
   if (models === null || models === undefined || typeof models !== 'object') return index
   for (const [id, tuple] of Object.entries(models)) {
     if (!Array.isArray(tuple)) continue
-    const [context, output, image, reasoning] = tuple as unknown[]
+    const [context, output, image, reasoning, levels, name] = tuple as unknown[]
+    const efforts = effortsMetaOf(levels)
     index.set(id.toLowerCase(), {
       ...(typeof context === 'number' && context > 0 ? { contextWindow: context } : {}),
       ...(typeof output === 'number' && output > 0 ? { maxTokens: output } : {}),
       ...(image === 1 ? { imageInput: true } : {}),
       ...(reasoning === 1 ? { reasoningModel: true } : {}),
+      ...(efforts !== undefined ? { reasoningEfforts: efforts } : {}),
+      ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
     })
   }
   return index
@@ -74,18 +213,34 @@ export function parseSnapshot(raw: string): ModelMetaIndex {
 
 /**
  * Parse the live models.dev catalog: `{ [provider]: { models: { [id]: {
- * limit?: { context?, output? }, modalities?: { input?: string[] },
- * attachment?: boolean, reasoning?: boolean } } } }`. The same id under
- * several providers merges with max(context), max(output), OR(image),
- * OR(reasoning).
+ * name?, limit?: { context?, output? }, modalities?: { input?: string[] },
+ * attachment?: boolean, reasoning?: boolean, reasoning_options?: Array<{
+ * type: 'effort' | 'toggle' | 'budget_tokens', values?: string[] }> } } } }`.
+ * Capacity facts merge across providers with max/OR; effort levels follow the
+ * first-party preference (see {@link FIRST_PARTY_PROVIDERS}): first-party
+ * sources win outright, otherwise aggregator sources intersect. Display names
+ * also prefer first-party sources (see the tail of this function).
  */
 export function parseCatalog(catalog: unknown): ModelMetaIndex {
   const index: ModelMetaIndex = new Map()
   if (catalog === null || typeof catalog !== 'object') return index
-  for (const provider of Object.values(catalog as Record<string, unknown>)) {
+  // Effort sources accumulate per id in two groups; the merge happens after
+  // the walk because first-party presence must silence aggregators entirely.
+  const firstPartySources = new Map<string, string[][]>()
+  const aggregatorSources = new Map<string, string[][]>()
+  // Display names accumulate the same way; unlike efforts they are cosmetic,
+  // so a first-party NAME (not mere presence) wins and an aggregator name is
+  // the fallback, never silenced.
+  const firstPartyNames = new Map<string, string>()
+  const aggregatorNames = new Map<string, string>()
+  // Every id a first-party provider carries, effort data or not — presence is
+  // the silencing condition, not effort-data presence.
+  const firstPartyIds = new Set<string>()
+  for (const [providerName, provider] of Object.entries(catalog as Record<string, unknown>)) {
     if (provider === null || typeof provider !== 'object') continue
     const models = (provider as Record<string, unknown>).models
     if (models === null || typeof models !== 'object') continue
+    const firstParty = FIRST_PARTY_PROVIDERS.has(providerName)
     for (const [id, raw] of Object.entries(models as Record<string, unknown>)) {
       if (raw === null || typeof raw !== 'object') continue
       const model = raw as Record<string, unknown>
@@ -96,6 +251,21 @@ export function parseCatalog(catalog: unknown): ModelMetaIndex {
       const input = modalities?.input
       const image = (Array.isArray(input) && input.includes('image')) || model.attachment === true
       const key = id.toLowerCase()
+      if (firstParty) firstPartyIds.add(key)
+      // Effort sources are collected for every entry, duplicated or not — the
+      // first-party merge happens after the walk (see below).
+      const levels = effortLevelsOf(model)
+      if (levels !== undefined) {
+        const sources = firstParty ? firstPartySources : aggregatorSources
+        const group = sources.get(key)
+        if (group === undefined) sources.set(key, [levels])
+        else group.push(levels)
+      }
+      const displayName = displayNameOf(model.name, key)
+      if (displayName !== undefined) {
+        const names = firstParty ? firstPartyNames : aggregatorNames
+        if (!names.has(key)) names.set(key, displayName)
+      }
       const current = index.get(key)
       const next: ModelMeta = {
         ...(typeof context === 'number' && context > 0 ? { contextWindow: context } : {}),
@@ -117,6 +287,29 @@ export function parseCatalog(catalog: unknown): ModelMetaIndex {
       })
     }
   }
+  for (const [key, sources] of firstPartySources) attachEfforts(index, key, sources)
+  // A first-party entry for the id — with or without effort data — wins; its
+  // effort-less budget-only/toggle shape is data too (Anthropic's claude and
+  // Google's gemini entries are budget-only, so aggregators must not refill).
+  for (const [key, sources] of aggregatorSources) {
+    if (!firstPartyIds.has(key)) attachEfforts(index, key, sources)
+  }
+  // Display names, resolved after the walk: the first-party name overrides
+  // whatever an earlier aggregator walk left on the entry, an aggregator name
+  // only fills an absence. A name can be an id's ONLY fact — it still
+  // enriches the selector.
+  const attachName = (key: string, name: string, override: boolean): void => {
+    const meta = index.get(key)
+    if (meta === undefined) {
+      index.set(key, { name })
+      return
+    }
+    if (meta.name !== undefined && !override) return
+    meta.name = name
+    index.set(key, meta)
+  }
+  for (const [key, name] of aggregatorNames) attachName(key, name, false)
+  for (const [key, name] of firstPartyNames) attachName(key, name, true)
   return index
 }
 

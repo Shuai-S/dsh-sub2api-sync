@@ -5,7 +5,7 @@ import type { StatusResponse } from '../src/routes.ts'
 function status(overrides: Partial<StatusResponse> = {}): StatusResponse {
   return {
     ok: true,
-    auth: { signedIn: true, kind: 'pat' },
+    auth: { signedIn: true, kind: 'panel' },
     instance: 'http://panel:9000',
     syncRunning: false,
     routes: [

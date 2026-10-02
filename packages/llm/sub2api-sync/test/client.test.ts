@@ -70,6 +70,29 @@ describe('Sub2apiClient.listModels', () => {
     await expect(client.listModels('sk-bad')).rejects.toThrowError(/HTTP 401/)
   })
 
+  it('surfaces the gateway refusal code and message (flat envelope)', async () => {
+    const { client } = fetchAnswering(403, { code: 'INSUFFICIENT_BALANCE', message: 'Insufficient account balance' })
+    await expect(client.listModels('sk-relay')).rejects.toThrowError(
+      /HTTP 403（INSUFFICIENT_BALANCE: Insufficient account balance）/,
+    )
+  })
+
+  it('surfaces the OpenAI-style nested error envelope', async () => {
+    const { client } = fetchAnswering(403, { error: { message: 'API key 已过期', code: 'API_KEY_EXPIRED' } })
+    await expect(client.listModels('sk-relay')).rejects.toThrowError(/HTTP 403（API_KEY_EXPIRED: API key 已过期）/)
+  })
+
+  it('degrades to status-only when the error body is unreadable', async () => {
+    const fetchImpl = (async () => ({ ok: false, status: 500, json: async () => { throw new Error('not json') } }) as unknown) as typeof fetch
+    const client = new Sub2apiClient({ baseURL: 'http://gw:8080', fetchImpl })
+    await expect(client.listModels('sk-relay')).rejects.toThrowError(/返回 HTTP 500$/)
+  })
+
+  it('omits the code when it duplicates the message', async () => {
+    const { client } = fetchAnswering(403, { code: 'nope', message: 'nope' })
+    await expect(client.listModels('sk-relay')).rejects.toThrowError(/HTTP 403（nope）/)
+  })
+
   it('rejects a non-http baseURL at construction', () => {
     expect(() => new Sub2apiClient({ baseURL: 'ftp://gw' })).toThrowError(/http\(s\)/)
     expect(() => new Sub2apiClient({ baseURL: '' })).toThrowError(/http\(s\)/)

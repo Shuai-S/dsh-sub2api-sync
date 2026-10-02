@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { PI_AI_NS, resolveTargets, Sub2apiSyncEngine, type SettingsPathOp, type SettingsLike } from '../src/engine.ts'
+import { PI_AI_NS, createSyncReportStore, resolveTargets, Sub2apiSyncEngine, type SettingsPathOp, type SettingsLike, type SyncReport } from '../src/engine.ts'
 import type { Sub2apiSyncConfig } from '../src/config.ts'
 import type { PanelGateway, PanelGroup, PanelKey } from '../src/panel.ts'
+import { legacyKeyRef, routeForKey, routeKeyRef } from '../src/types.ts'
+
+/** The instance address every config() below uses; routes derive from it. */
+const INSTANCE = 'http://gw:8080'
+/** Route + credential ref for the standard test key (id 5) under INSTANCE. */
+const ROUTE = routeForKey(INSTANCE, 5)
+const REF = routeKeyRef(ROUTE)
 
 /**
  * Settings double: per-namespace documents with generic path-op application
@@ -109,6 +116,10 @@ class FakeGateway {
   keys: PanelKey[]
   created: Array<{ name: string; groupId: number }> = []
   deletedIds: number[] = []
+  /** Plaintext answers for the controlled reveal endpoint, by key id. */
+  revealed = new Map<number, string>()
+  /** When set, reveal rejects with this error (e.g. key not client-owned). */
+  revealError: Error | undefined
   private nextKeyId = 100
 
   constructor(groups: PanelGroup[] = [], keys: PanelKey[] = []) {
@@ -121,8 +132,9 @@ class FakeGateway {
     listKeys(token: string, options?: { groupId?: number; page?: number; pageSize?: number }): Promise<{ items: PanelKey[]; total: number; pages: number }>
     createKey(token: string, input: { name: string; groupId: number; quota?: number; expiresinDays?: number }): Promise<PanelKey>
     deleteKey(token: string, id: number): Promise<void>
+    revealKey(token: string, id: number): Promise<{ key: string }>
   }, token: string) => Promise<T>): Promise<T> {
-    if (!this.signedIn) return Promise.reject(new Error('sub2api-sync: 尚未登录 sub2api 面板——请先在设置卡完成登录或粘贴 PAT'))
+    if (!this.signedIn) return Promise.reject(new Error('sub2api-sync: 尚未登录 sub2api 面板——请先在设置卡完成登录'))
     const panel = {
       listAvailableGroups: async (_token: string) => structuredClone(this.groups),
       listKeys: async (_token: string, options?: { groupId?: number; page?: number; pageSize?: number }) => {
@@ -145,6 +157,12 @@ class FakeGateway {
         this.deletedIds.push(id)
         this.keys = this.keys.filter((key) => key.id !== id)
       },
+      revealKey: async (_token: string, id: number) => {
+        if (this.revealError !== undefined) throw this.revealError
+        const value = this.revealed.get(id)
+        if (value === undefined) throw new Error('key not client-owned')
+        return { key: value }
+      },
     }
     return fn(panel, 'test-token')
   }
@@ -162,6 +180,22 @@ function fetchAnswering(payload: unknown): typeof fetch {
   }) as Response) as typeof fetch
 }
 
+/** Status/payload script consumed in order; records each call's bearer token. */
+function fetchScripted(answers: Array<{ status: number; payload: unknown }>): { fetchImpl: typeof fetch; tokens: string[] } {
+  const tokens: string[] = []
+  const queue = [...answers]
+  const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    tokens.push(String(new Headers(init?.headers).get('authorization') ?? ''))
+    const answer = queue.shift() ?? { status: 500, payload: {} }
+    return {
+      ok: answer.status >= 200 && answer.status < 300,
+      status: answer.status,
+      json: async () => answer.payload,
+    } as Response
+  }) as typeof fetch
+  return { fetchImpl, tokens }
+}
+
 
 const CLAUDE_GROUP: PanelGroup = {
   id: 1,
@@ -176,7 +210,7 @@ function makeEngine(options: {
   credentials?: FakeCredentials
   gateway?: FakeGateway
   fetchImpl?: typeof fetch
-  modelIndex?: Map<string, { contextWindow?: number; maxTokens?: number; imageInput?: boolean }>
+  modelIndex?: Map<string, { name?: string; contextWindow?: number; maxTokens?: number; imageInput?: boolean; reasoningEfforts?: Record<string, string | null> }>
 } = {}): { engine: Sub2apiSyncEngine; settings: FakeSettings; credentials: FakeCredentials; gateway: FakeGateway } {
   const settings = options.settings ?? new FakeSettings()
   const credentials = options.credentials ?? new FakeCredentials()
@@ -226,14 +260,17 @@ describe('Sub2apiSyncEngine.sync', () => {
     const report = await engine.sync(config({ selectedKeys: [5] }))
 
     expect(gateway.created).toEqual([])
-    expect(credentials.get('DSH_SUB2API_KEY_5')).toBe('sk-5')
+    expect(credentials.get(REF)).toBe('sk-5')
     expect(report.writes).toBe(1)
     expect(report.entries).toEqual([
-      { groupId: 1, route: 'sub2api-5', displayName: 'NexaRelay(Claude 拼车)', action: 'created', models: 1 },
+      { groupId: 1, route: ROUTE, keyId: 5, displayName: 'sub2api(Claude 拼车)', action: 'created', models: 1 },
     ])
-    const profile = settings.providers['sub2api-5'] as { apiKeyEnv: string; displayName: string }
-    expect(profile.apiKeyEnv).toBe('DSH_SUB2API_KEY_5')
-    expect(profile.displayName).toBe('NexaRelay(Claude 拼车)')
+    const profile = settings.providers[ROUTE] as { apiKeyEnv: string; displayName: string }
+    expect(profile.apiKeyEnv).toBe(REF)
+    expect(profile.displayName).toBe('sub2api(Claude 拼车)')
+    // The route must not leak the panel's sequential key id.
+    expect(ROUTE).toMatch(/^sub2api-[0-9a-f]{10}$/)
+    expect(ROUTE).not.toContain('5')
   })
 
   it('is idempotent: the second sync writes nothing and keeps the same key', async () => {
@@ -244,9 +281,9 @@ describe('Sub2apiSyncEngine.sync', () => {
     await engine.sync(config({ selectedKeys: [5] }))
     const report = await engine.sync(config({ selectedKeys: [5] }))
     expect(report.writes).toBe(0)
-    expect(report.entries[0]).toMatchObject({ route: 'sub2api-5', action: 'unchanged' })
-    expect(credentials.get('DSH_SUB2API_KEY_5')).toBe('sk-5')
-    expect(Object.keys(settings.providers)).toEqual(['sub2api-5'])
+    expect(report.entries[0]).toMatchObject({ route: ROUTE, action: 'unchanged' })
+    expect(credentials.get(REF)).toBe('sk-5')
+    expect(Object.keys(settings.providers)).toEqual([ROUTE])
   })
 
   it('fails a selected key the panel no longer serves', async () => {
@@ -256,6 +293,8 @@ describe('Sub2apiSyncEngine.sync', () => {
     const report = await engine.sync(config({ selectedKeys: [999] }))
     expect(report.entries[0]).toMatchObject({ action: 'failed' })
     expect(report.entries[0].error).toContain('面板不存在')
+    // The invalid flag is what lets the card auto-drop the stale selection.
+    expect(report.entries[0].invalid).toBe(true)
   })
 
   it('reports a group whose platform has no protocol mapping', async () => {
@@ -266,20 +305,21 @@ describe('Sub2apiSyncEngine.sync', () => {
     expect(report.entries[0].error).toContain('没有协议映射')
   })
 
-  it('falls back to the stored credential when the panel masks the plaintext', async () => {
+  it('migrates plaintext from the legacy key-id ref when the panel masks the row', async () => {
     const { engine, settings, credentials } = makeEngine({
       fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }] }),
       credentials: (() => {
         const creds = new FakeCredentials()
-        creds.set('DSH_SUB2API_KEY_5', 'sk-stored')
+        creds.set(legacyKeyRef(5), 'sk-stored')
         return creds
       })(),
       gateway: new FakeGateway([structuredClone(CLAUDE_GROUP)], [{ id: 5, name: 'Claude 拼车', groupId: 1 }]),
     })
     const report = await engine.sync(config({ selectedKeys: [5] }))
     expect(report.writes).toBe(1)
-    expect((settings.providers['sub2api-5'] as { apiKeyEnv: string }).apiKeyEnv).toBe('DSH_SUB2API_KEY_5')
-    expect(credentials.get('DSH_SUB2API_KEY_5')).toBe('sk-stored')
+    expect((settings.providers[ROUTE] as { apiKeyEnv: string }).apiKeyEnv).toBe(REF)
+    // The legacy value is re-persisted under the new slug ref.
+    expect(credentials.get(REF)).toBe('sk-stored')
   })
 
   it('removes routes and credentials for keys that left the selection', async () => {
@@ -290,9 +330,40 @@ describe('Sub2apiSyncEngine.sync', () => {
     })
     await engine.sync(config({ selectedKeys: [5] }))
     const report = await engine.sync(config({ selectedKeys: [] }))
-    expect(report.removed).toEqual(['sub2api-5'])
+    expect(report.removed).toEqual([ROUTE])
     expect(Object.keys(settings.providers)).toEqual([])
-    expect(credentials.get('DSH_SUB2API_KEY_5')).toBeUndefined()
+    expect(credentials.get(REF)).toBeUndefined()
+  })
+
+  it('revokes the remote key of a removed route via the slug reverse map', async () => {
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS))
+    const { engine } = makeEngine({
+      fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }] }),
+      gateway,
+    })
+    await engine.sync(config({ selectedKeys: [5], deleteOrphanKeys: true }))
+    expect(gateway.deletedIds).toEqual([])
+    await engine.sync(config({ selectedKeys: [], deleteOrphanKeys: true }))
+    expect(gateway.deletedIds).toEqual([5])
+  })
+
+  it('cleans up a legacy digit route (and its ref) on the migration sync', async () => {
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS))
+    const settings = new FakeSettings()
+    settings.docs['llm-pi-ai'].providers = { 'sub2api-5': { displayName: 'legacy', api: 'anthropic-messages' } }
+    const credentials = new FakeCredentials()
+    credentials.seed(legacyKeyRef(5), 'sk-legacy')
+    const { engine } = makeEngine({
+      settings,
+      credentials,
+      fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }] }),
+      gateway,
+    })
+    await engine.sync(config({ selectedKeys: [5] }))
+    // The stale legacy entry is gone; the new slug route replaced it.
+    expect(settings.providers['sub2api-5']).toBeUndefined()
+    expect(settings.providers[ROUTE]).toBeDefined()
+    expect(credentials.unsetCalls).toContain(legacyKeyRef(5))
   })
 
   it('honors protocolOverrides keyed by group id', async () => {
@@ -302,13 +373,13 @@ describe('Sub2apiSyncEngine.sync', () => {
       gateway,
     })
     await engine.sync(config({ selectedKeys: [5], protocolOverrides: { '1': 'openai-completions' } }))
-    expect((settings.providers['sub2api-5'] as { api: string }).api).toBe('openai-completions')
+    expect((settings.providers[ROUTE] as { api: string }).api).toBe('openai-completions')
   })
 
   it('enriches model capacity facts from the metadata index (C4)', async () => {
     const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS))
     const modelIndex = new Map([
-      ['claude-x', { contextWindow: 200000, maxTokens: 64000, imageInput: true }],
+      ['claude-x', { name: 'Claude X 4.5', contextWindow: 200000, maxTokens: 64000, imageInput: true }],
     ])
     const { engine, settings } = makeEngine({
       gateway,
@@ -316,14 +387,73 @@ describe('Sub2apiSyncEngine.sync', () => {
       fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }, { id: 'unknown-model' }] }),
     })
     await engine.sync(config({ selectedKeys: [5] }))
-    const profile = settings.providers['sub2api-5'] as { models: Array<Record<string, unknown>> }
+    const profile = settings.providers[ROUTE] as { models: Array<Record<string, unknown>> }
     expect(profile.models[0]).toEqual({
       id: 'claude-x',
+      name: 'Claude X 4.5',
       contextWindow: 200000,
       maxTokens: 64000,
       input: ['text', 'image'],
     })
+    // No index match → no name either; the id stays the display name.
     expect(Object.keys(profile.models[1])).toEqual(['id'])
+  })
+
+  it('auto-fills per-model reasoning efforts and lets the template override (C4)', async () => {
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS))
+    const modelIndex = new Map([
+      ['claude-x', { contextWindow: 200000, reasoningEfforts: { off: null, low: 'low', high: 'high' } }],
+    ])
+    const { engine, settings } = makeEngine({
+      gateway,
+      modelIndex,
+      fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }, { id: 'plain-model' }] }),
+    })
+    // Auto fill lands on the matching model only; the template stays untouched.
+    await engine.sync(config({ selectedKeys: [5] }))
+    const profile = settings.providers[ROUTE] as { models: Array<Record<string, unknown>> }
+    expect(profile.models[0].reasoningEfforts).toEqual({ off: null, low: 'low', high: 'high' })
+    expect(profile.models[1]).not.toHaveProperty('reasoningEfforts')
+
+    // An explicit template (map) wins on the next idempotent recompute.
+    await engine.sync(config({ selectedKeys: [5], compatTemplate: { reasoningEfforts: { high: 'ultra' } } }))
+    const overridden = settings.providers[ROUTE] as { models: Array<Record<string, unknown>> }
+    expect(overridden.models[0].reasoningEfforts).toEqual({ high: 'ultra' })
+
+    // And an explicit template false declares every model non-reasoning.
+    await engine.sync(config({ selectedKeys: [5], compatTemplate: { reasoningEfforts: false } }))
+    const disabled = settings.providers[ROUTE] as { models: Array<Record<string, unknown>> }
+    expect(disabled.models[0].reasoningEfforts).toBe(false)
+  })
+
+  it('writes the template default effort only when every model supports it', async () => {
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS))
+    const modelIndex = new Map([
+      ['claude-x', { contextWindow: 200000, reasoningEfforts: { off: null, low: 'low', high: 'high' } }],
+    ])
+    const { engine, settings } = makeEngine({
+      gateway, modelIndex,
+      fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }] }),
+    })
+    // 'low' is in the model's map → the provider default is written.
+    await engine.sync(config({ selectedKeys: [5], compatTemplate: { reasoning: 'low' } }))
+    expect((settings.providers[ROUTE] as { reasoning?: string }).reasoning).toBe('low')
+
+    // 'medium' is not → the provider default is stripped and the report says so.
+    const report = await engine.sync(config({ selectedKeys: [5], compatTemplate: { reasoning: 'medium' } }))
+    expect((settings.providers[ROUTE] as { reasoning?: string }).reasoning).toBeUndefined()
+    expect(report.warnings.some((w) => w.includes('compatTemplate.reasoning=medium'))).toBe(true)
+  })
+
+  it('strips the default effort when a model has no effort metadata at all', async () => {
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS))
+    const { engine, settings } = makeEngine({
+      gateway,
+      fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }, { id: 'plain-model' }] }),
+    })
+    const report = await engine.sync(config({ selectedKeys: [5], compatTemplate: { reasoning: 'high' } }))
+    expect((settings.providers[ROUTE] as { reasoning?: string }).reasoning).toBeUndefined()
+    expect(report.warnings.join('\n')).toContain('2 个模型不支持')
   })
 
   it('retries on a settings conflict after re-reading and recomputing', async () => {
@@ -367,5 +497,135 @@ describe('Sub2apiSyncEngine.sync', () => {
     release()
     await Promise.all([first, second])
     expect(engine.isRunning()).toBe(false)
+  })
+})
+
+describe('createSyncReportStore', () => {
+  const report: SyncReport = { entries: [], removed: [], writes: 1, attempts: 1, warnings: [] }
+
+  it('starts empty, records with a wall-clock time, and replaces on the next record', () => {
+    const store = createSyncReportStore()
+    expect(store.report()).toBeUndefined()
+    expect(store.at()).toBeUndefined()
+
+    store.record(report)
+    expect(store.report()).toBe(report)
+    expect(store.at()).toBeGreaterThan(0)
+
+    const next: SyncReport = { entries: [], removed: ['sub2api-x'], writes: 2, attempts: 1, warnings: [] }
+    store.record(next)
+    expect(store.report()).toBe(next)
+  })
+
+  it('clear() wipes both the report and its timestamp (purge semantics)', () => {
+    const store = createSyncReportStore()
+    store.record(report)
+    store.clear()
+    expect(store.report()).toBeUndefined()
+    expect(store.at()).toBeUndefined()
+    // A later sync records fresh again after the purge.
+    store.record(report)
+    expect(store.report()).toBe(report)
+    expect(store.at()).toBeGreaterThan(0)
+  })
+})
+describe('discovery 401 self-heal', () => {
+  const MASKED_ROW = { id: 5, name: 'Claude 拼车', groupId: 1, key: 'sk-1****abcd' }
+  const LEGACY_REF = 'DSH_SUB2API_KEY_5'
+
+  it('drops a stale legacy credential and recovers through reveal', async () => {
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], [{ ...MASKED_ROW }])
+    gateway.revealed.set(5, 'sk-fresh')
+    const credentials = new FakeCredentials()
+    credentials.seed(LEGACY_REF, 'sk-legacy-old')
+    const { fetchImpl, tokens } = fetchScripted([
+      { status: 401, payload: { code: 'INVALID_API_KEY', message: 'Invalid API key' } },
+      { status: 200, payload: { data: [{ id: 'claude-x' }] } },
+    ])
+    const { engine, settings } = makeEngine({ fetchImpl, gateway, credentials })
+
+    const report = await engine.sync(config({ selectedKeys: [5] }))
+
+    expect(report.entries[0]).toMatchObject({ route: ROUTE, action: 'created', models: 1 })
+    expect(tokens[0]).toBe('Bearer sk-legacy-old')
+    expect(tokens[1]).toBe('Bearer sk-fresh')
+    // The validated value is persisted under the slug ref; the poisoned
+    // instance-less legacy ref is gone.
+    expect(credentials.get(REF)).toBe('sk-fresh')
+    expect(credentials.get(LEGACY_REF)).toBeUndefined()
+    expect(credentials.unsetCalls).toContain(LEGACY_REF)
+    expect(Object.keys(settings.providers)).toEqual([ROUTE])
+  })
+
+  it('rejects a masked stored value at any chain step and still reaches reveal', async () => {
+    // An ancient build persisted a masked row into the legacy ref; today the
+    // panel blanks the key field entirely. The chain must not stop there.
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], [{ id: 5, name: 'Claude 拼车', groupId: 1, key: '' }])
+    gateway.revealed.set(5, 'sk-fresh')
+    const credentials = new FakeCredentials()
+    credentials.seed(LEGACY_REF, 'sk-1****abcd')
+    const { fetchImpl, tokens } = fetchScripted([
+      { status: 200, payload: { data: [{ id: 'claude-x' }] } },
+    ])
+    const { engine } = makeEngine({ fetchImpl, gateway, credentials })
+
+    const report = await engine.sync(config({ selectedKeys: [5] }))
+
+    expect(report.entries[0]).toMatchObject({ route: ROUTE, action: 'created', models: 1 })
+    expect(tokens[0]).toBe('Bearer sk-fresh')
+    expect(credentials.get(LEGACY_REF)).toBeUndefined()
+    expect(credentials.get(REF)).toBe('sk-fresh')
+  })
+
+  it('gives up loudly when reveal cannot replace the dropped credential', async () => {
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], [{ ...MASKED_ROW }])
+    gateway.revealError = new Error('key not client-owned')
+    const credentials = new FakeCredentials()
+    credentials.seed(LEGACY_REF, 'sk-legacy-old')
+    const { fetchImpl } = fetchScripted([
+      { status: 401, payload: { code: 'INVALID_API_KEY', message: 'Invalid API key' } },
+    ])
+    const { engine } = makeEngine({ fetchImpl, gateway, credentials })
+
+    // Per-key failures land in the report, not as a rejected sync.
+    const report = await engine.sync(config({ selectedKeys: [5] }))
+    expect(report.entries[0]).toMatchObject({ action: 'failed' })
+    expect(report.entries[0].error).toContain('本地存底已作废，但 reveal 也失败：key not client-owned')
+    expect(credentials.get(LEGACY_REF)).toBeUndefined()
+  })
+
+  it('keeps the original failure for non-401 discovery errors (no invalidation)', async () => {
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], [{ ...MASKED_ROW }])
+    const credentials = new FakeCredentials()
+    credentials.seed(REF, 'sk-stored')
+    const { fetchImpl } = fetchScripted([
+      { status: 403, payload: { code: 'INSUFFICIENT_BALANCE', message: 'Insufficient account balance' } },
+    ])
+    const { engine } = makeEngine({ fetchImpl, gateway, credentials })
+
+    const report = await engine.sync(config({ selectedKeys: [5] }))
+    expect(report.entries[0]).toMatchObject({ action: 'failed' })
+    expect(report.entries[0].error).toContain('HTTP 403（INSUFFICIENT_BALANCE: Insufficient account balance）')
+    expect(report.entries[0].error).not.toContain('本地存底已作废')
+    expect(credentials.get(REF)).toBe('sk-stored')
+    expect(credentials.unsetCalls).toEqual([])
+  })
+})
+
+describe('routeKeyIds map', () => {
+  const KEYS_FIXTURE = [{ id: 5, name: 'Claude 拼车', groupId: 1, key: 'sk-5' }]
+
+  it('records route → keyId on success and unsets it when the route is removed', async () => {
+    const { engine, settings } = makeEngine({
+      fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }] }),
+      gateway: new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS_FIXTURE)),
+    })
+
+    await engine.sync(config({ selectedKeys: [5] }))
+    expect((settings.docs['sub2api-sync'] as Record<string, unknown>).routeKeyIds).toEqual({ [ROUTE]: 5 })
+
+    // Drop the key from the selection → route removed → map entry gone.
+    await engine.sync(config({ selectedKeys: [] }))
+    expect((settings.docs['sub2api-sync'] as Record<string, unknown>).routeKeyIds).toEqual({})
   })
 })

@@ -43,6 +43,8 @@ export interface PiAiProviderProfile {
   defaultMaxTokens?: number
   defaultInput?: Array<'text' | 'image'>
   retryPolicy?: PiAiRetryPolicy
+  /** Provider-level default reasoning effort (pi-ai `reasoning`). */
+  reasoning?: ThinkingLevel
 }
 
 /**
@@ -112,11 +114,12 @@ export function protocolForPlatform(platform: string): ApiProtocol | undefined {
  * a Config field (C5: must contain `{keyName}`); callers that receive an
  * invalid template still get a sane name instead of a broken one.
  */
-export function renderProviderName(template: string | undefined, keyName: string): string {
-  if (template !== undefined && template.length > 0 && template.includes('{keyName}')) {
-    return template.replaceAll('{keyName}', keyName)
+export function renderProviderName(template: string | undefined, keyName: string, siteName?: string): string {
+  const site = siteName !== undefined && siteName.length > 0 ? siteName : 'sub2api'
+  if (template !== undefined && template.length > 0 && (template.includes('{keyName}') || template.includes('{siteName}'))) {
+    return template.replaceAll('{siteName}', site).replaceAll('{keyName}', keyName)
   }
-  return `NexaRelay(${keyName})`
+  return `${site}(${keyName})`
 }
 
 /**
@@ -131,18 +134,33 @@ export function baseURLForProtocol(instance: string, protocol: ApiProtocol): str
   return /\/v1$/i.test(cleaned) ? cleaned : `${cleaned}/v1`
 }
 
+/** pi-ai thinking levels a provider-level default effort may name. */
+export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number]
+
 /** Per-model template inherited by every synced model entry (Config field). */
 export interface ModelTemplate {
   compat?: Record<string, unknown>
   reasoningEfforts?: false | Record<string, string | null>
+  /**
+   * Provider-level default reasoning effort (pi-ai profile `reasoning`): the
+   * effort preselected for every synced model and sent when the user has not
+   * picked one. models.dev publishes no default-effort data, so this is the
+   * user's explicit choice rather than catalog-derived.
+   */
+  reasoning?: ThinkingLevel
 }
 
 /** One discovered model with its enrichment facts (from the models.dev index). */
 export interface ProfileModelInput {
   id: string
+  /** Display name for selectors (models.dev `name`); absent keeps the id. */
+  name?: string
   contextWindow?: number
   maxTokens?: number
   imageInput?: boolean
+  /** Per-model auto-filled effort map (models.dev `reasoning_options`). */
+  reasoningEfforts?: Record<string, string | null>
 }
 
 export interface ProfileInput {
@@ -160,6 +178,9 @@ export interface ProfileInput {
 /** Build one hand-declared llm-pi-ai provider profile for a group. */
 export function buildProviderProfile(input: ProfileInput): PiAiProviderProfile {
   const compat = input.template?.compat
+  // Reasoning-effort precedence: an explicit template (map or `false`) is the
+  // user's decision and wins over the per-model auto-fill; only a template
+  // without `reasoningEfforts` lets the models.dev-derived map through.
   const reasoning = input.template?.reasoningEfforts
   return {
     displayName: input.displayName.length > 0 ? input.displayName : `Group ${input.groupId}`,
@@ -168,6 +189,9 @@ export function buildProviderProfile(input: ProfileInput): PiAiProviderProfile {
     baseURL: baseURLForProtocol(input.instance, input.protocol),
     models: input.models.map((model) => ({
       id: model.id,
+      // Display name for the model-catalog editor's 显示名称 column (the
+      // pi-ai entry's `name` field); absent leaves the id as the name.
+      ...(model.name !== undefined ? { name: model.name } : {}),
       // Enrichment (C4) fills the capacity facts the gateway never reports;
       // models without a match keep the route-level defaults below.
       ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
@@ -176,8 +200,15 @@ export function buildProviderProfile(input: ProfileInput): PiAiProviderProfile {
       ...(compat !== undefined ? { compat: { ...compat } } : {}),
       ...(reasoning === false
         ? { reasoningEfforts: false }
-        : reasoning !== undefined ? { reasoningEfforts: { ...reasoning } } : {}),
+        : reasoning !== undefined
+          ? { reasoningEfforts: { ...reasoning } }
+          : model.reasoningEfforts !== undefined
+            ? { reasoningEfforts: { ...model.reasoningEfforts } }
+            : {}),
     })),
+    // Provider-level default effort (pi-ai `reasoning`) — the UI preselects
+    // it and drops its "provider default" option once present.
+    ...(input.template?.reasoning !== undefined ? { reasoning: input.template.reasoning } : {}),
     // Route-level defaults for models the enrichment could not match.
     defaultContextWindow: 128000,
     defaultMaxTokens: 8192,

@@ -10,6 +10,7 @@
 
 import { useMemo, useSyncExternalStore } from 'react'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { SyncReport } from '../engine.ts'
 import type { Sub2apiSyncConfig } from '../config.ts'
 
 /**
@@ -50,4 +51,31 @@ export function setField(
 /** Queue one field clear — the field re-inherits the composition layer. */
 export function unsetField(form: ConfigForm<Sub2apiSyncConfig>, field: string): Promise<boolean> {
   return form.unset(field)
+}
+
+/**
+ * Drop selected key ids that the panel no longer serves (the sync report
+ * flags them `invalid`) — a stale id has no row in the Keys card, so without
+ * this the user could never uncheck it. Returns whether the selection changed.
+ */
+export async function pruneInvalidSelection(config: ConfigForm<Sub2apiSyncConfig>, report: SyncReport): Promise<boolean> {
+  const invalid = new Set(report.entries.filter((entry) => entry.invalid === true).map((entry) => entry.groupId))
+  if (invalid.size === 0) return false
+  const current = config.getSnapshot().value?.selectedKeys ?? []
+  const next = current.filter((id) => !invalid.has(id))
+  if (next.length === current.length) return false
+  await setField(config, 'selectedKeys', [...next].sort((a, b) => a - b))
+  return true
+}
+
+/**
+ * Drop one key id from the selection after its provider was removed via the
+ * report's remove button — the host already deleted the route and
+ * credential; a lingering selection would resurrect both on the next sync.
+ */
+export async function dropSelectedKey(config: ConfigForm<Sub2apiSyncConfig>, keyId: number): Promise<boolean> {
+  const current = config.getSnapshot().value?.selectedKeys ?? []
+  if (!current.includes(keyId)) return false
+  await setField(config, 'selectedKeys', current.filter((id) => id !== keyId))
+  return true
 }

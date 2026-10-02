@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-sub2api-sync",
-  "description": "Sync one sub2api instance's groups, keys, and models into dsh-llm-pi-ai provider routes: panel-driven login (PAT / password / OAuth) first, one group one provider.",
+  "description": "Sync one sub2api instance's groups, keys, and models into dsh-llm-pi-ai provider routes: panel-driven login (password / OAuth) first, one group one provider.",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
@@ -14,7 +14,8 @@
     },
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "lib",
@@ -29,6 +30,7 @@
   },
   "scripts": {
     "build": "tsdown && node scripts/wrap-client.mjs",
+    "prepare": "pnpm build",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
     "test": "vitest run",
     "models:refresh": "node scripts/fetch-models-dev.mjs",

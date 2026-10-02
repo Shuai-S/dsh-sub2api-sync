@@ -2,7 +2,8 @@
  * U2 placement 3: the badge on every sub2api-managed provider card in the
  * Models page. The slot is keyed by the row's settings namespace, so this
  * registration receives every hand-declared `llm-pi-ai` card and filters to
- * the `sub2api-<digits>` routes it owns. Read-only by design: status and
+ * the `sub2api-<10-hex>` (and legacy digit) routes it owns. Read-only by
+ * design: status and
  * provenance only, with a pointer to the management entry — the slot has no
  * cross-section navigation seat.
  *

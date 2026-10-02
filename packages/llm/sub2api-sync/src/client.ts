@@ -56,12 +56,42 @@ export class Sub2apiClient {
       signal: options?.signal,
     })
     if (!response.ok) {
-      throw new Error(`sub2api 网关 GET ${this.root}/models 返回 HTTP ${response.status}`)
+      throw new Error(`sub2api 网关 GET ${this.root}/models 返回 HTTP ${response.status}${await refusalDetail(response)}`)
     }
     const payload: unknown = await response.json()
     return readModelList(payload)
   }
 
+}
+
+/**
+ * Extract the gateway's own refusal reason from an error body so the sync
+ * report can say WHY a key was rejected (balance / expiry / subscription /
+ * IP allow-list), not just the HTTP status. sub2api writes two shapes:
+ * flat `{code, message}` (middleware ErrorResponse) and OpenAI-style
+ * `{error: {message, code}}`; anything else degrades to "".
+ */
+export async function refusalDetail(response: Response): Promise<string> {
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    return ''
+  }
+  if (typeof payload !== 'object' || payload === null) return ''
+  const record = payload as { code?: unknown; message?: unknown; error?: unknown }
+  const nested = typeof record.error === 'object' && record.error !== null
+    ? (record.error as { code?: unknown; message?: unknown })
+    : undefined
+  const message = [nested?.message, record.message].find(
+    (candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0,
+  )
+  const code = [nested?.code, record.code].find(
+    (candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0,
+  )
+  if (message === undefined && code === undefined) return ''
+  const label = code !== undefined && message !== undefined && message !== code ? `${code}: ${message}` : (code ?? message ?? '')
+  return label.length > 0 ? `（${label}）` : ''
 }
 
 /** Tolerant reader for the `/models` payload; unknown shapes fail loudly. */

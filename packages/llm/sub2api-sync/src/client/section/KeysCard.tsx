@@ -17,9 +17,9 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { PanelKeyMeta } from '../../routes.ts'
 import type { Sub2apiSyncConfig } from '../../config.ts'
-import { renderProviderName } from '../../protocols.ts'
-import { DEFAULT_PROVIDER_NAME_TEMPLATE } from '../../types.ts'
-import { setField, useConfigForm } from '../useConfigForm.ts'
+import { protocolForPlatform } from '../../protocols.ts'
+import { platformLabel } from '../../types.ts'
+import { pruneInvalidSelection, setField, useConfigForm } from '../useConfigForm.ts'
 import type { GroupsView } from '../../routes.ts'
 import type { NS } from '../locales.ts'
 import { refreshStatus } from '../status.ts'
@@ -70,7 +70,6 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
   useEffect(() => { loadPage(1) }, [api])
 
   const selectedIds = snapshot.value?.selectedKeys ?? []
-  const template = snapshot.value?.providerNameTemplate ?? DEFAULT_PROVIDER_NAME_TEMPLATE
 
   const toggle = (keyId: number, next: boolean): void => {
     const nextSet = new Set(selectedIds)
@@ -87,6 +86,9 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
       .then(async (report) => {
         const okCount = report.report.entries.filter((entry) => entry.action !== 'failed').length
         setFeedback({ tone: okCount === report.report.entries.length ? 'ok' : 'error', text: t('syncSelectedDone', { ok: okCount, total: report.report.entries.length }) })
+        // Stale selections (ids the panel no longer serves) have no row to
+        // uncheck — drop them from the selection automatically.
+        await pruneInvalidSelection(config, report.report)
         await refreshStatus()
       })
       .catch((cause: unknown) => { setFeedback({ tone: 'error', text: cause instanceof Error ? cause.message : String(cause) }) })
@@ -159,8 +161,24 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
       {keys.length > 0 && (
         <div className="s2s-column">
           {keys.map((key) => {
+            // The group's type drives the wire-protocol mapping at sync
+            // (anthropic → anthropic-messages, OpenAI family →
+            // openai-responses, the rest → openai-completions); the row
+            // surfaces it so the mapping is visible before syncing.
+            const platform = groups.find((group) => group.id === key.groupId)?.platform
+            const protocol = platform === undefined ? undefined : protocolForPlatform(platform)
             return (
-              <div key={key.id} className="s2s-keyRow">
+              <div
+                key={key.id}
+                className="s2s-keyRow"
+                onClick={(event) => {
+                  // The checkbox label owns clicks on itself (its native
+                  // change event fires there); any other click in the row
+                  // toggles the selection once.
+                  if ((event.target as HTMLElement).closest('label') !== null) return
+                  toggle(key.id, !selectedIds.includes(key.id))
+                }}
+              >
                 <Checkbox
                   checked={selectedIds.includes(key.id)}
                   onChange={(next) => { toggle(key.id, next) }}
@@ -168,7 +186,12 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
                 />
                 <Tag tone="neutral">{groupNameOf(key.groupId)}</Tag>
                 {key.status !== undefined ? <span className="s2s-badgeHint">{key.status}</span> : null}
-                <span className="s2s-badgeHint">{t('providerPreview', { name: renderProviderName(template, key.name) })}</span>
+                <span
+                  className="s2s-badgeHint"
+                  title={platform === undefined ? undefined : t('groupTypeTitle', { type: platformLabel(platform), protocol: protocol ?? '—' })}
+                >
+                  {platform === undefined ? '—' : platformLabel(platform)}
+                </span>
               </div>
             )
           })}

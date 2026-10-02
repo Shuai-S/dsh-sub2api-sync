@@ -14,9 +14,14 @@
 
 import { ROUTES } from '../routes.ts'
 import type {
+  AccountResponse,
   GroupsResponse,
   LoginResponse,
-  PatResponse,
+  OAuthAttemptStatusResponse,
+  OAuthCancelResponse,
+  OAuthProbeResponse,
+  OAuthStartResponse,
+  SiteResponse,
   StatusResponse,
   SyncResponse,
   CreateKeyResponse,
@@ -68,11 +73,18 @@ export interface PluginApi {
   login(email: string, password: string | undefined): Promise<LoginResponse>
   login2fa(code: string): Promise<LoginResponse>
   logout(): Promise<{ ok: true }>
-  pat(token: string): Promise<PatResponse>
   groups(): Promise<GroupsResponse>
   listKeys(page: number, pageSize: number): Promise<KeysResponse>
   createKey(input: { groupId: number; name: string }): Promise<CreateKeyResponse>
+  site(): Promise<SiteResponse>
+  account(): Promise<AccountResponse>
+  resetSyncState(previousBaseURL?: string): Promise<{ ok: true }>
+  removeKey(keyId: number): Promise<{ ok: true }>
   sync(keyIds?: number[]): Promise<SyncResponse>
+  oauthStart(): Promise<OAuthStartResponse>
+  oauthProbe(address: string): Promise<OAuthProbeResponse>
+  oauthStatus(attemptId: string | undefined): Promise<OAuthAttemptStatusResponse>
+  oauthCancel(attemptId: string): Promise<OAuthCancelResponse>
 }
 
 /** Build the plugin API face injected into the cards (pure; no cordis). */
@@ -85,10 +97,23 @@ export function createPluginApi(): PluginApi {
     })),
     login2fa: (code) => callJson<LoginResponse>(ROUTES.login2fa, post({ code })),
     logout: () => callJson<{ ok: true }>(ROUTES.logout, post()),
-    pat: (token) => callJson<PatResponse>(ROUTES.pat, post({ token })),
     groups: () => callJson<GroupsResponse>(ROUTES.groups),
     listKeys: (page, pageSize) => callJson<KeysResponse>(`${ROUTES.keys}?page=${page}&pageSize=${pageSize}`),
     createKey: (input) => callJson<CreateKeyResponse>(ROUTES.keys, post(input)),
+    site: () => callJson<SiteResponse>(ROUTES.site),
+    account: () => callJson<AccountResponse>(ROUTES.account),
+    resetSyncState: (previousBaseURL) => callJson<{ ok: true }>(ROUTES.resetSync, post(
+      previousBaseURL !== undefined ? { previousBaseURL } : undefined,
+    )),
+    removeKey: (keyId) => callJson<{ ok: true }>(ROUTES.removeKey, post({ keyId })),
     sync: (keyIds) => callJson<SyncResponse>(ROUTES.sync, post(keyIds !== undefined ? { keyIds } : undefined)),
+    oauthStart: () => callJson<OAuthStartResponse>(ROUTES.oauthStart, post()),
+    oauthProbe: (address) =>
+      callJson<OAuthProbeResponse>(`${ROUTES.oauthProbe}?address=${encodeURIComponent(address)}`),
+    oauthStatus: (attemptId) =>
+      callJson<OAuthAttemptStatusResponse>(
+        attemptId !== undefined ? `${ROUTES.oauthStatus}?attempt=${encodeURIComponent(attemptId)}` : ROUTES.oauthStatus,
+      ),
+    oauthCancel: (attemptId) => callJson<OAuthCancelResponse>(ROUTES.oauthCancel, post({ attemptId })),
   }
 }

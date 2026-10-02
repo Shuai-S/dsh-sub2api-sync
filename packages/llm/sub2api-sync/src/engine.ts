@@ -15,7 +15,8 @@
  *
  * Guarantees (per the design Agent Note, carried over):
  * - idempotent: a second sync with unchanged inputs produces zero writes;
- * - scoped: only `sub2api-<digits>` routes are ever written or removed;
+ * - scoped: only `sub2api-<10-hex>` (and legacy `sub2api-<digits>`) routes
+ *   are ever written or removed;
  * - optimistic: writes carry `expectedRevision` and a `SettingsConflictError`
  *   triggers a re-read, a recompute, and a bounded retry (3 attempts);
  * - single flight: syncs are serialized on one queue;
@@ -31,10 +32,11 @@ import { buildProviderProfile, protocolForPlatform, renderProviderName, type PiA
 import { loadModelIndex, type ModelMetaIndex } from './enrich.ts'
 import type { Sub2apiSyncConfig } from './config.ts'
 import {
-  groupIdOfRoute,
   isOwnedRoute,
-  relayKeyRef,
+  legacyKeyIdOfRoute,
+  legacyKeyRef,
   routeForKey,
+  routeKeyRef,
   type ApiProtocol,
   type CredentialsLike,
   type SettingsLike,
@@ -52,11 +54,16 @@ export type { SettingsLike, SettingsPathOp } from './types.ts'
 export interface SyncEngineOptions {
   settings: SettingsLike
   credentials: CredentialsLike
-  /** Credential-backed panel gateway (login/PAT tokens, single-flight refresh). */
+  /** Credential-backed panel gateway (login tokens, single-flight refresh). */
   gateway: PanelGateway
   fetchImpl?: typeof fetch
   /** Model-metadata index loader (C4); overridable in tests. */
   loadModelIndex?: typeof loadModelIndex
+  /**
+   * The instance's configured site name for the `{siteName}` template
+   * placeholder (cached probe; absent/unknown falls back to "sub2api").
+   */
+  siteName?: () => Promise<string | undefined>
 }
 
 export type SyncAction = 'created' | 'updated' | 'unchanged' | 'failed'
@@ -64,10 +71,14 @@ export type SyncAction = 'created' | 'updated' | 'unchanged' | 'failed'
 export interface SyncEntryOutcome {
   groupId: number
   route: string
+  /** The panel key id this entry synced (absent for stale/invalid ids). */
+  keyId?: number
   displayName?: string
   action: SyncAction
   models?: number
   error?: string
+  /** Set when the selected id does not exist in the panel (stale selection). */
+  invalid?: true
 }
 
 export interface SyncReport {
@@ -78,6 +89,31 @@ export interface SyncReport {
   /** How many mutate attempts were used (1 = no conflict). */
   attempts: number
   warnings: string[]
+}
+
+/**
+ * In-memory holder for the last accepted sync report (the status
+ * projection's `lastReport` / `lastReportAt`). The host clears it wherever
+ * the sync state is purged — logout, definitive auth loss, instance
+ * switch — because a report describing routes that no longer exist must
+ * not keep presenting itself as the current state.
+ */
+export interface SyncReportStore {
+  record(report: SyncReport): void
+  clear(): void
+  report(): SyncReport | undefined
+  at(): number | undefined
+}
+
+export function createSyncReportStore(): SyncReportStore {
+  let report: SyncReport | undefined
+  let at: number | undefined
+  return {
+    record: (value) => { report = value; at = Date.now() },
+    clear: () => { report = undefined; at = undefined },
+    report: () => report,
+    at: () => at,
+  }
 }
 
 /** Whole-sync failure: bad config, not signed in, llm-pi-ai unavailable, or retries exhausted. */
@@ -144,6 +180,7 @@ export class Sub2apiSyncEngine {
   private readonly gateway: PanelGateway
   private readonly fetchImpl?: typeof fetch
   private readonly modelIndexLoader: typeof loadModelIndex
+  private readonly siteName?: () => Promise<string | undefined>
   private queue: Promise<unknown> = Promise.resolve()
   private running = false
 
@@ -153,6 +190,7 @@ export class Sub2apiSyncEngine {
     this.gateway = options.gateway
     this.fetchImpl = options.fetchImpl
     this.modelIndexLoader = options.loadModelIndex ?? loadModelIndex
+    this.siteName = options.siteName
   }
 
   /** Whether a sync is currently executing (UI busy marker). */
@@ -211,31 +249,36 @@ export class Sub2apiSyncEngine {
     const modelIndex = await this.modelIndexLoader({ enrich: config.enrichModelMeta !== false, ...(this.fetchImpl !== undefined ? { fetchImpl: this.fetchImpl } : {}) }).catch(
       () => new Map() as ModelMetaIndex,
     )
+    // The `{siteName}` placeholder value — one cached probe per sync.
+    const site = await this.siteName?.().catch(() => undefined)
 
+    const syncWarnings: string[] = []
     const effective = { ...config, selectedKeys: selection ?? config.selectedKeys }
     for (const target of resolveTargets(effective, keyRows)) {
       if ('invalid' in target) {
-        entries.push({ groupId: target.invalid, route: `${target.invalid}`, action: 'failed', error: target.error })
+        entries.push({ groupId: target.invalid, route: `${target.invalid}`, action: 'failed', error: target.error, invalid: true })
         continue
       }
       const key = target.key
-      const route = routeForKey(key.id)
+      const route = routeForKey(instance, key.id)
       try {
         const group = groupById.get(key.groupId)
         if (group === undefined) {
           throw new Sub2apiSyncError(`key #${key.id}（${key.name}）的分组 ${key.groupId} 在面板不可用`)
         }
-        const profile = await this.buildKeyProfile(config, key, group, instance, modelIndex)
+        const { profile, warnings: profileWarnings } = await this.buildKeyProfile(config, key, group, instance, modelIndex, site)
         desired.set(route, profile)
+        syncWarnings.push(...profileWarnings)
         entries.push({
           groupId: group.id,
           route,
+          keyId: key.id,
           displayName: profile.displayName,
           action: 'unchanged',
           models: profile.models?.length ?? 0,
         })
       } catch (error) {
-        entries.push({ groupId: key.groupId, route, action: 'failed', error: messageOf(error) })
+        entries.push({ groupId: key.groupId, route, keyId: key.id, action: 'failed', error: messageOf(error) })
       }
     }
 
@@ -272,24 +315,47 @@ export class Sub2apiSyncEngine {
     }
 
     // Deletion semantics: a route dropped from the selection loses its entry
-    // (mutate above) and its credential (here, best effort). The route embeds
-    // the key id, so remote revocation is always addressable.
-    const warnings: string[] = []
+    // (mutate above) and its credential (here, best effort). The credential
+    // ref derives from the route itself, so cleanup never needs the key id;
+    // the id for a remote revoke comes from the panel rows (new routes) or
+    // the legacy digit encoding (pre-rev.5 routes).
+    const keyIdByRoute = new Map(keyRows.map((row) => [routeForKey(instance, row.id), row.id]))
+    const warnings = [...syncWarnings]
     for (const route of removed) {
-      const keyId = groupIdOfRoute(route)
-      if (keyId === undefined) continue
       try {
-        await this.credentials.unset(relayKeyRef(keyId))
+        await this.credentials.unset(routeKeyRef(route))
       } catch (error) {
         warnings.push(`key ${route} 的凭据清理失败：${messageOf(error)}`)
       }
-      if (config.deleteOrphanKeys === true) {
+      const keyId = keyIdByRoute.get(route) ?? legacyKeyIdOfRoute(route)
+      if (config.deleteOrphanKeys === true && keyId !== undefined) {
         try {
           await this.gateway.use((panel, token) => panel.deleteKey(token, keyId))
         } catch (error) {
           warnings.push(`key ${route} 的远端撤销失败：${messageOf(error)}`)
         }
       }
+    }
+
+    // Persist the route → key id map in this plugin's own section: slugs
+    // deliberately hide the numeric id, and the card's per-route remove
+    // button needs it without a panel round trip. Best effort — a failed
+    // write only costs the remove button until the next sync.
+    try {
+      const mapOps: SettingsPathOp[] = []
+      for (const entry of entries) {
+        if (entry.keyId !== undefined && entry.action !== 'failed') {
+          mapOps.push({ op: 'set', path: ['routeKeyIds', entry.route], value: entry.keyId })
+        }
+      }
+      for (const route of removed) {
+        mapOps.push({ op: 'unset', path: ['routeKeyIds', route] })
+      }
+      if (mapOps.length > 0) {
+        await this.settings.mutate(OWN_NS, mapOps, this.revisionOf(OWN_NS))
+      }
+    } catch {
+      // Non-fatal: the next successful sync rewrites the map.
     }
 
     return { entries, removed, writes: ops.length, attempts, warnings }
@@ -303,7 +369,8 @@ export class Sub2apiSyncEngine {
     group: PanelGroup,
     instance: string,
     modelIndex: ModelMetaIndex,
-  ): Promise<PiAiProviderProfile> {
+    site: string | undefined,
+  ): Promise<{ profile: PiAiProviderProfile; warnings: string[] }> {
     const protocol: ApiProtocol | undefined = protocolForPlatformWithOverride(group.platform, config.protocolOverrides?.[String(group.id)])
     if (protocol === undefined) {
       throw new Sub2apiSyncError(
@@ -311,33 +378,133 @@ export class Sub2apiSyncEngine {
       )
     }
 
-    const ref = relayKeyRef(key.id)
+    const route = routeForKey(instance, key.id)
+    const ref = routeKeyRef(route)
+    // A masked value (e.g. "sk-1****abcd") is NOT plaintext — sending it
+    // upstream yields gateway 401s, and accepting it at ANY chain step
+    // short-circuits the later sources (an ancient build persisted masked
+    // rows into the credential store before mask detection existed). Every
+    // step therefore rejects empty/masked candidates; a masked stored value
+    // is garbage and gets unset on the spot.
+    const usable = (value: string | undefined): value is string =>
+      value !== undefined && value.length > 0 && !value.includes('****')
+    // Where the plaintext came from: panel rows and reveal answers are
+    // current by construction; a stored/legacy credential can predate the
+    // instance (legacy refs are instance-less — another deployment sharing
+    // the numeric key id poisons them) or a panel-side key rotation. The
+    // discovery-401 self-heal below keys off this source.
+    let source: 'panel' | 'stored' | 'legacy' = 'panel'
+    let revealFailure: string | undefined
     let plaintext = key.key
-    if (plaintext === undefined || plaintext.length === 0) {
+    if (!usable(plaintext)) {
+      plaintext = undefined
       const stored = await this.credentials.resolve(ref)
-      plaintext = stored?.value
+      if (usable(stored?.value)) {
+        plaintext = stored?.value
+        source = 'stored'
+      } else if (stored?.value !== undefined) {
+        await this.credentials.unset(ref).catch(() => undefined)
+      }
     }
-    if (plaintext === undefined || plaintext.length === 0) {
-      throw new Sub2apiSyncError(`key #${key.id}（${key.name}）面板未返回明文且没有已存凭据——请用管理员账号登录面板，或粘贴这把 key`)
+    if (!usable(plaintext) && ref !== legacyKeyRef(key.id)) {
+      // Migration read: pre-rev.5 deployments stored plaintext under the raw
+      // key-id ref. Read it so existing setups keep syncing; the value gets
+      // re-persisted under the new ref below — but only after discovery
+      // proves it works against THIS instance.
+      const legacy = await this.credentials.resolve(legacyKeyRef(key.id))
+      if (usable(legacy?.value)) {
+        plaintext = legacy?.value
+        source = 'legacy'
+      } else if (legacy?.value !== undefined) {
+        await this.credentials.unset(legacyKeyRef(key.id)).catch(() => undefined)
+      }
     }
+    if (!usable(plaintext)) {
+      // OAuth channel masks key plaintext in listings; the controlled reveal
+      // endpoint is the documented exception for client-owned keys. Keep the
+      // failure reason — "endpoint missing" vs "key not client-owned" vs
+      // "token expired" changes what the user does next.
+      try {
+        const revealed = await this.gateway.use((panel, token) => panel.revealKey(token, key.id))
+        plaintext = !usable(revealed.key) ? undefined : revealed.key
+        if (plaintext === undefined) revealFailure = 'reveal 未返回可用明文'
+      } catch (error) {
+        revealFailure = messageOf(error)
+      }
+    }
+    if (!usable(plaintext)) {
+      const revealNote = revealFailure !== undefined ? `；reveal 接口也失败：${revealFailure}` : ''
+      throw new Sub2apiSyncError(`key #${key.id}（${key.name}）拿不到明文（面板列表不回明文且凭据库没有可用存底${revealNote}）——请在面板删除这把 key 后用插件「创建 key」重建，重建时会自动保存明文`)
+    }
+
+    let models: GatewayModelEntry[]
+    try {
+      models = await this.discoverModels(config, group.id, instance, plaintext)
+    } catch (error) {
+      // Discovery 401 on a stored/legacy plaintext: the value does not
+      // authenticate against THIS instance. Drop the stored copies (so they
+      // cannot poison every later sync) and retry once with the controlled
+      // reveal value — the authoritative source for client-owned keys.
+      if ((source !== 'stored' && source !== 'legacy') || !/HTTP 401(?![0-9])/.test(messageOf(error))) throw error
+      await this.credentials.unset(ref).catch(() => undefined)
+      if (ref !== legacyKeyRef(key.id)) await this.credentials.unset(legacyKeyRef(key.id)).catch(() => undefined)
+      let revealed: string | undefined
+      try {
+        revealed = (await this.gateway.use((panel, token) => panel.revealKey(token, key.id)))?.key
+      } catch (revealError) {
+        throw new Sub2apiSyncError(
+          `${messageOf(error)}；本地存底已作废，但 reveal 也失败：${messageOf(revealError)}——请在面板删除这把 key 后用插件「创建 key」重建`,
+        )
+      }
+      if (revealed === undefined || revealed.length === 0 || revealed.includes('****')) {
+        throw new Sub2apiSyncError(`${messageOf(error)}；本地存底已作废，但 reveal 未返回明文——请在面板删除这把 key 后用插件「创建 key」重建`)
+      }
+      plaintext = revealed
+      models = await this.discoverModels(config, group.id, instance, plaintext)
+    }
+
+    // Keep the credential in step only after a proven-good discovery: a
+    // failed sync must not persist an unvalidated (possibly wrong) value.
     if (this.credentials.resolve !== undefined) {
-      // Keep the credential in step so later syncs survive panel masking.
       const stored = await this.credentials.resolve(ref)
       if (stored?.value !== plaintext) {
         await this.credentials.set(ref, plaintext)
       }
     }
-
-    const models = await this.discoverModels(config, group.id, instance, plaintext)
-    return buildProviderProfile({
-      groupId: group.id,
-      displayName: renderProviderName(config.providerNameTemplate, key.name),
-      protocol,
-      instance,
-      models: models.map((model) => enrichModel(model, modelIndex)),
-      apiKeyEnv: ref,
-      template: config.compatTemplate,
-    })
+    const enriched = models.map((model) => enrichModel(model, modelIndex))
+    // compatTemplate.reasoning is a PROVIDER-level default; pi-ai refuses a
+    // request whose effort the model does not support, so a heterogeneous
+    // group (non-reasoning models, narrower vocabularies) must not inherit
+    // it blindly. Emit it only when every model supports the level; strip
+    // it and say so otherwise.
+    let template = config.compatTemplate
+    const warnings: string[] = []
+    const requestedDefault = template?.reasoning
+    if (requestedDefault !== undefined) {
+      const lacking = enriched
+        .filter((model) => {
+          const wire = model.reasoningEfforts?.[requestedDefault]
+          return model.reasoningEfforts === undefined || wire === undefined || wire === null
+        })
+        .map((model) => model.id)
+      if (lacking.length > 0) {
+        template = { ...template, reasoning: undefined }
+        const preview = lacking.length > 5 ? `${lacking.slice(0, 5).join('、')} 等` : lacking.join('、')
+        warnings.push(`compatTemplate.reasoning=${requestedDefault} 未写入默认档位：${lacking.length} 个模型不支持该档位（${preview}）——未手动选择档位的请求会被拒绝，故整组回退为不设默认`)
+      }
+    }
+    return {
+      profile: buildProviderProfile({
+        groupId: group.id,
+        displayName: renderProviderName(config.providerNameTemplate, key.name, site),
+        protocol,
+        instance,
+        models: enriched,
+        apiKeyEnv: ref,
+        template,
+      }),
+      warnings,
+    }
   }
 
 
@@ -389,15 +556,17 @@ export class Sub2apiSyncEngine {
   }
 }
 
-/** Attach the enriched capacity facts (if any) to one discovered model. */
+/** Attach the enriched facts (display name, capacity, efforts) to one discovered model. */
 function enrichModel(model: GatewayModelEntry, index: ModelMetaIndex): ProfileModelInput {
   const meta = index.get(model.id.toLowerCase())
   if (meta === undefined) return { id: model.id }
   return {
     id: model.id,
+    ...(meta.name !== undefined ? { name: meta.name } : {}),
     ...(meta.contextWindow !== undefined ? { contextWindow: meta.contextWindow } : {}),
     ...(meta.maxTokens !== undefined ? { maxTokens: meta.maxTokens } : {}),
     ...(meta.imageInput === true ? { imageInput: true } : {}),
+    ...(meta.reasoningEfforts !== undefined ? { reasoningEfforts: { ...meta.reasoningEfforts } } : {}),
   }
 }
 

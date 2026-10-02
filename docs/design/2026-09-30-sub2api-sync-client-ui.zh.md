@@ -324,7 +324,7 @@ form.mutate(ops, expectedRevision?)  // 原子多字段写（SettingsPathOpView[
 | C1 | Mode B（指纹路由）迁移语义 | **未上线、不兼容历史数据 → 指纹路由族整体退役**：`fingerprintKeyId` 路由命名删除；「粘贴」降为登录态下的 key 来源第三态（key 归属跟随所选分组 gid）。原 `manualGroups` 语义可自由重构 |
 | C2 | 分组勾选缺省态 | **全不选**（用户逐组勾选，避免误同步全部分组） |
 | C3 | `sub2api_sync` 工具面 | 保留：仅同步动作，参数 `{ groups? }`；不可触发登录/写凭据 |
-| C4 | models.dev 元数据补全 | **已实现（rev.5）**：引擎同步时按模型 id 从 models.dev 补全 contextWindow/maxTokens/图片输入；联网拉取 24h 缓存，失败与关闭态降级到随包内置快照 `data/models-dev.snapshot.json`（`models:refresh` 脚本再生成）；`reasoningEfforts` 仍仅由模板控制 |
+| C4 | models.dev 元数据补全 | **已实现（rev.5）**：引擎同步时按模型 id 从 models.dev 补全 contextWindow/maxTokens/图片输入；联网拉取 24h 缓存，失败与关闭态降级到随包内置快照 `data/models-dev.snapshot.json`（`models:refresh` 脚本再生成）；~~`reasoningEfforts` 仍仅由模板控制~~ **rev.6 起按模型自动填充**：取条目 `reasoning_options` 的 `effort` 枚举映射为 pi-ai 档位（`none`→`off: null`，其余同名直传），合并 first-party 优先（官方条目存在即胜出、budget-only 亦压制聚合商虚报；无官方条目时聚合商取交集），优先级 **模板显式设置（含 `false`）> 每模型自动填充 > 不写**，仍由 `enrichModelMeta` 管辖；`toggle`/`budget_tokens` 型推理（claude/gemini/deepseek-v3.2/kimi-k2.x）无 effort 字符串线形态，不适用 |
 | C5 | `providerNameTemplate` 校验 | 必须含 `{keyName}` 占位符，缺失即拒写（settings 响亮失败路径） |
 | C6 | sub2api 上游依赖 | **不依赖上游——用户自行改造自己的 sub2api 部署**（§12 即自改造施工说明）；方案 A/B 由部署者实现，A3 不再受上游发布节奏约束 |
 | C7 | REAL composition 测试 | A1 一并补齐（mock sub2api server + 真实组合断言） |

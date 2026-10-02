@@ -59,6 +59,18 @@ const CSS = `
   background: var(--dsw-alias-bg-skeleton);
 }
 
+.s2s-avatar .s2s-favicon {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+
+.s2s-actions .s2s-feedback {
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
 .s2s-identityCopy {
   display: flex;
   flex-direction: column;
@@ -91,6 +103,19 @@ const CSS = `
   gap: 10px;
   flex-wrap: wrap;
   flex: none;
+}
+
+/* The account-balance pill in the identity header's action row. */
+.s2s-balance {
+  flex: none;
+  padding: 3px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-secondary);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .s2s-warn {
@@ -138,9 +163,10 @@ const CSS = `
 }
 
 .s2s-keyRow {
-  display: flex;
+  display: grid;
+  /* Columns align across rows: name+checkbox / group / status / type. */
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   width: 100%;
   min-height: 36px;
@@ -153,6 +179,12 @@ const CSS = `
   font: inherit;
   text-align: left;
   cursor: pointer;
+  user-select: none;
+}
+
+.s2s-keyRow > :last-child {
+  justify-self: end;
+  text-align: right;
 }
 
 .s2s-keyRow:hover {
@@ -174,6 +206,12 @@ const CSS = `
   gap: 8px;
   padding: 2px 0;
   min-width: 0;
+}
+
+.s2s-reportRemove {
+  margin-left: auto;
+  flex: none;
+  align-self: center;
 }
 
 .s2s-reportMark {

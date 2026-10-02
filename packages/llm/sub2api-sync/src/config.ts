@@ -4,12 +4,13 @@
  *
  * rev.4 shape (no legacy compatibility — the project has not shipped):
  * - `selectedKeys` lists the relay keys checked for sync (default `[]` — 全不选);
- * - one provider route per selected key (`sub2api-<key-id>`), written by the
- *   card and by the engine's keyId persistence;
+ * - one provider route per selected key (`sub2api-<10-hex>` slug over
+ *   instance + key id — no sequential ids in route or credential names),
+ *   written by the card and by the engine's keyId persistence;
  * - `manualGroups` (hand-declared Mode B groups) is retired — groups come
  *   from the panel, and platform is read directly from the panel DTO;
  * - `providerNameTemplate` renders the provider displayName (C5: must keep
- *   the `{keyName}` placeholder);
+ *   the `{keyName}` or `{siteName}` placeholder);
  * - `allowRemoteActions` is the cross-device escape hatch (§11 of the
  *   client-UI design note).
  *
@@ -25,7 +26,8 @@
 
 import z from '@deepseek-ai/schemastery'
 import type { ModelTemplate } from './protocols.ts'
-import type { ApiProtocol } from './types.ts'
+import { DEFAULT_PROVIDER_NAME_TEMPLATE, type ApiProtocol } from './types.ts'
+import { THINKING_LEVELS, type ThinkingLevel } from './protocols.ts'
 
 /** Per-group key-source options; `keyId` absent = 自动（组名建/复用）. */
 export interface Sub2apiSyncConfig {
@@ -33,7 +35,7 @@ export interface Sub2apiSyncConfig {
   baseURL?: string
   /** Panel account email (Mode A, password/2FA channel). */
   email?: string
-  /** Provider displayName template; `{keyName}` placeholder (C5). Default `NexaRelay({keyName})`. */
+  /** Provider displayName template; `{keyName}` and `{siteName}` placeholders. Default `{siteName}({keyName})`. */
   providerNameTemplate?: string
   /** Relay keys selected for sync (panel key ids); default `[]` — 全不选. */
   selectedKeys?: number[]
@@ -41,6 +43,10 @@ export interface Sub2apiSyncConfig {
   modelListOverrides?: Record<string, string[]>
   /** Per-group wire-protocol override over the panel platform mapping. */
   protocolOverrides?: Record<string, ApiProtocol>
+  /** Registered route → panel key id, written by the engine so the card's
+   * per-route remove button works without a panel round trip (slugs hide
+   * the numeric id by design). */
+  routeKeyIds?: Record<string, number>
   /** Per-model template inherited by every synced model entry. */
   compatTemplate?: ModelTemplate
   /** models.dev metadata enrichment toggle (reserved, C4). */
@@ -71,13 +77,18 @@ const apiProtocolSchema = z.union([
 export const Config: z<Sub2apiSyncConfig, any> = z.object({
   baseURL: z.string().volatile(),
   email: z.string().volatile(),
-  providerNameTemplate: z.string().default('NexaRelay({keyName})').volatile(),
+  providerNameTemplate: z.string().default(DEFAULT_PROVIDER_NAME_TEMPLATE).volatile(),
   selectedKeys: z.array(z.number().step(1)).default([]).volatile(),
   modelListOverrides: z.dict(z.array(z.string())).default({}).volatile(),
   protocolOverrides: z.dict(apiProtocolSchema).default({}).volatile(),
+  routeKeyIds: z.dict(z.number().step(1)).default({}).volatile(),
   compatTemplate: z.object({
     compat: z.dict(z.any()),
     reasoningEfforts: z.union([z.const(false), z.dict(z.union([z.string(), z.const(null)]))]),
+    reasoning: z.union([
+      z.const('off'), z.const('minimal'), z.const('low'),
+      z.const('medium'), z.const('high'), z.const('xhigh'), z.const('max'),
+    ]),
   }).volatile(),
   enrichModelMeta: z.boolean().default(true).volatile(),
   keyQuota: z.number().volatile(),
@@ -133,9 +144,16 @@ export function validateConfig(config: Sub2apiSyncConfig): void {
   if (config.baseURL !== undefined && config.baseURL.length > 0 && !/^https?:\/\//i.test(config.baseURL.trim())) {
     throw new Error('sub2api-sync: baseURL 必须以 http(s):// 开头')
   }
+  const compat = config.compatTemplate
+  if (compat?.reasoning !== undefined && !THINKING_LEVELS.includes(compat.reasoning as ThinkingLevel)) {
+    throw new Error(`sub2api-sync: compatTemplate.reasoning 必须是 ${THINKING_LEVELS.join('/')} 之一`)
+  }
   const template = config.providerNameTemplate
-  if (template !== undefined && template.length > 0 && !template.includes('{keyName}')) {
-    throw new Error('sub2api-sync: providerNameTemplate 必须包含 {keyName} 占位符')
+  if (
+    template !== undefined && template.length > 0 &&
+    !template.includes('{keyName}') && !template.includes('{siteName}')
+  ) {
+    throw new Error('sub2api-sync: providerNameTemplate 必须包含 {keyName} 或 {siteName} 占位符')
   }
   for (const id of config.selectedKeys ?? []) {
     if (!Number.isSafeInteger(id) || id <= 0) {

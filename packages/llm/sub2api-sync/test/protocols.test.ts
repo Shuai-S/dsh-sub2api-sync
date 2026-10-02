@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import { baseURLForProtocol, buildProviderProfile, guessPlatformFromModels, protocolForPlatform, renderProviderName, SUB2API_RETRY_POLICY } from '../src/protocols.ts'
-import { isOwnedRoute, groupIdOfRoute, panelRefreshRef, panelTokenRef, parseGroupId, relayKeyRef, routeForKey } from '../src/types.ts'
+import { isOwnedRoute, legacyKeyIdOfRoute, legacyKeyRef, panelRefreshRef, panelTokenRef, parseGroupId, platformLabel, routeForKey, routeKeyRef, sha256Hex, suffixOfRoute } from '../src/types.ts'
+
+describe('platformLabel', () => {
+  it('labels the verified platforms with the picker wording', () => {
+    expect(platformLabel('anthropic')).toBe('Anthropic')
+    expect(platformLabel('openai')).toBe('OpenAI')
+    expect(platformLabel('zhipu')).toBe('Zhipu GLM')
+    expect(platformLabel('composite')).toBe('Composite')
+  })
+
+  it('passes unknown platforms through raw (future-proof)', () => {
+    expect(platformLabel('minimax')).toBe('minimax')
+    expect(platformLabel('opencode')).toBe('opencode')
+  })
+})
 
 describe('platform → protocol mapping', () => {
   it('maps the nine verified platforms', () => {
@@ -63,6 +77,15 @@ describe('provider profile construction', () => {
     expect(profile.baseURL).toBe('http://gw/v1')
   })
 
+  it('writes the enriched display name onto the model entry when present', () => {
+    const profile = buildProviderProfile({
+      groupId: 1, displayName: 'X', protocol: 'anthropic-messages', instance: 'http://gw', apiKeyEnv: 'K',
+      models: [{ id: 'claude-x', name: 'Claude X 4.5' }, { id: 'plain' }],
+    })
+    expect(profile.models?.[0]).toEqual({ id: 'claude-x', name: 'Claude X 4.5' })
+    expect(profile.models?.[1]).toEqual({ id: 'plain' })
+  })
+
   it('clones the compat template into every model without sharing references', () => {
     const template = { compat: { supportsDeveloperRole: false } }
     const profile = buildProviderProfile({
@@ -73,6 +96,19 @@ describe('provider profile construction', () => {
     expect(profile.models?.[1]?.compat).toEqual({ supportsDeveloperRole: false })
     expect(profile.models?.[0]?.compat).not.toBe(template.compat)
     expect(profile.models?.[0]?.compat).not.toBe(profile.models?.[1]?.compat)
+  })
+
+  it('carries the provider-level default effort when the template names one', () => {
+    const withDefault = buildProviderProfile({
+      groupId: 1, displayName: 'X', protocol: 'openai-responses', instance: 'http://gw', apiKeyEnv: 'K',
+      models: [{ id: 'a' }], template: { reasoning: 'medium' },
+    })
+    expect(withDefault.reasoning).toBe('medium')
+    const without = buildProviderProfile({
+      groupId: 1, displayName: 'X', protocol: 'openai-responses', instance: 'http://gw', apiKeyEnv: 'K',
+      models: [{ id: 'a' }],
+    })
+    expect(without.reasoning).toBeUndefined()
   })
 
   it('passes reasoning efforts through, including explicit off', () => {
@@ -87,27 +123,58 @@ describe('provider profile construction', () => {
     })
     expect(levels.models?.[0]?.reasoningEfforts).toEqual({ low: 'low', high: 'high' })
   })
+
+  describe('reasoning-effort precedence (template > auto-fill)', () => {
+    const AUTO = { off: null, low: 'low', high: 'high' }
+    const build = (template?: { reasoningEfforts?: false | Record<string, string | null> }) => buildProviderProfile({
+      groupId: 1, displayName: 'X', protocol: 'openai-responses', instance: 'http://gw', apiKeyEnv: 'K',
+      models: [{ id: 'a', reasoningEfforts: { ...AUTO } }, { id: 'b' }],
+      ...(template !== undefined ? { template } : {}),
+    })
+
+    it('auto-fills the per-model map when the template has no reasoningEfforts', () => {
+      const profile = build()
+      expect(profile.models?.[0]?.reasoningEfforts).toEqual(AUTO)
+      expect(profile.models?.[0]?.reasoningEfforts).not.toBe(AUTO)
+      expect(profile.models?.[1]).not.toHaveProperty('reasoningEfforts')
+    })
+
+    it('lets an explicit template map win over the auto fill', () => {
+      const profile = build({ reasoningEfforts: { low: 'low' } })
+      expect(profile.models?.[0]?.reasoningEfforts).toEqual({ low: 'low' })
+    })
+
+    it('lets an explicit template false win over the auto fill', () => {
+      const profile = build({ reasoningEfforts: false })
+      expect(profile.models?.[0]?.reasoningEfforts).toBe(false)
+    })
+  })
 })
 
 describe('renderProviderName', () => {
-  it('renders the default NexaRelay template when none is configured', () => {
-    expect(renderProviderName(undefined, 'Claude 拼车')).toBe('NexaRelay(Claude 拼车)')
-    expect(renderProviderName('', 'Claude 拼车')).toBe('NexaRelay(Claude 拼车)')
+  it('renders the default template with the site name, falling back to sub2api', () => {
+    expect(renderProviderName(undefined, 'Claude 拼车', '我的中转')).toBe('我的中转(Claude 拼车)')
+    expect(renderProviderName(undefined, 'Claude 拼车')).toBe('sub2api(Claude 拼车)')
+    expect(renderProviderName('', 'Claude 拼车', '')).toBe('sub2api(Claude 拼车)')
   })
 
-  it('substitutes {keyName} in a custom template', () => {
+  it('substitutes {keyName} and {siteName} in custom templates', () => {
+    expect(renderProviderName('{siteName}·{keyName}', '我的key', '站点A')).toBe('站点A·我的key')
     expect(renderProviderName('NexaRelay({keyName})', '我的key')).toBe('NexaRelay(我的key)')
     expect(renderProviderName('[{keyName}] 中转', 'gpt组')).toBe('[gpt组] 中转')
+    expect(renderProviderName('{siteName} 中转', 'k')).toBe('sub2api 中转')
   })
 
-  it('falls back to the default template when the placeholder is missing', () => {
-    expect(renderProviderName('no placeholder here', 'k')).toBe('NexaRelay(k)')
+  it('falls back to the default template when no placeholder is present', () => {
+    expect(renderProviderName('no placeholder here', 'k', '站点C')).toBe('站点C(k)')
+    expect(renderProviderName('no placeholder here', 'k')).toBe('sub2api(k)')
   })
 })
 
 describe('ownership boundary and naming', () => {
-  it('owns only sub2api-<digits> routes', () => {
-    expect(isOwnedRoute('sub2api-12')).toBe(true)
+  it('owns slug routes and legacy digit routes, nothing else', () => {
+    expect(isOwnedRoute(routeForKey('http://gw:8080', 12))).toBe(true)
+    expect(isOwnedRoute('sub2api-12')).toBe(true) // legacy shape, migrated on next sync
     expect(isOwnedRoute('sub2api-0')).toBe(true)
     expect(isOwnedRoute('sub2api-openai')).toBe(false)
     expect(isOwnedRoute('sub2api-12a')).toBe(false)
@@ -115,17 +182,36 @@ describe('ownership boundary and naming', () => {
     expect(isOwnedRoute('my-route')).toBe(false)
   })
 
-  it('round-trips group ids through route names', () => {
-    expect(routeForKey(42)).toBe('sub2api-42')
-    expect(groupIdOfRoute('sub2api-42')).toBe(42)
-    expect(groupIdOfRoute('sub2api-openai')).toBeUndefined()
-    expect(groupIdOfRoute('sub2api-042')).toBe(42)
+  it('derives opaque stable slugs from instance + key id (no sequential leak)', () => {
+    expect(routeForKey('http://gw:8080', 42)).toMatch(/^sub2api-[0-9a-f]{10}$/)
+    expect(routeForKey('http://gw:8080', 42)).toBe(routeForKey('http://gw:8080/', 42))
+    expect(routeForKey('http://gw:8080', 42)).toBe(routeForKey('http://GW:8080', 42))
+    // Different keys and different instances never share a route.
+    expect(routeForKey('http://gw:8080', 42)).not.toBe(routeForKey('http://gw:8080', 43))
+    expect(routeForKey('http://gw:8080', 42)).not.toBe(routeForKey('http://other:8080', 42))
+  })
+
+  it('round-trips route suffixes and legacy ids', () => {
+    expect(suffixOfRoute(routeForKey('http://gw:8080', 42))).toMatch(/^[0-9a-f]{10}$/)
+    expect(suffixOfRoute('sub2api-42')).toBe('42')
+    expect(suffixOfRoute('sub2api-openai')).toBeUndefined()
+    expect(legacyKeyIdOfRoute('sub2api-42')).toBe(42)
+    expect(legacyKeyIdOfRoute('sub2api-042')).toBe(42)
+    expect(legacyKeyIdOfRoute(routeForKey('http://gw:8080', 42))).toBeUndefined()
+    expect(legacyKeyIdOfRoute('sub2api-openai')).toBeUndefined()
   })
 })
 
 describe('credential references', () => {
-  it('names relay key credentials deterministically', () => {
-    expect(relayKeyRef(12)).toBe('DSH_SUB2API_KEY_12')
+  it('derives relay key refs from the route suffix (both shapes)', () => {
+    expect(routeKeyRef('sub2api-12')).toBe('DSH_SUB2API_KEY_12')
+    expect(routeKeyRef(routeForKey('http://gw:8080', 12))).toMatch(/^DSH_SUB2API_KEY_[0-9a-f]{10}$/)
+    expect(routeKeyRef(routeForKey('http://gw:8080', 12))).not.toBe(routeKeyRef(routeForKey('http://other:8080', 12)))
+    expect(() => routeKeyRef('sub2api-openai')).toThrowError(/不是本插件的路由名/)
+  })
+
+  it('keeps the legacy key-id ref for migration reads', () => {
+    expect(legacyKeyRef(12)).toBe('DSH_SUB2API_KEY_12')
   })
 
   it('scopes panel token refs to the instance', () => {
@@ -143,6 +229,23 @@ describe('credential references', () => {
     expect(parseGroupId('12a')).toBeUndefined()
     expect(parseGroupId('9007199254740993')).toBeUndefined() // 2^53 + 1
     expect(parseGroupId(undefined)).toBeUndefined()
+  })
+})
+
+describe('sha256Hex (route slug primitive)', () => {
+  it('matches the FIPS 180-4 test vectors', () => {
+    expect(sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+    expect(sha256Hex('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+    expect(sha256Hex('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq')).toBe(
+      '248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1',
+    )
+  })
+
+  it('handles multi-block and non-ASCII inputs', () => {
+    // 1000 × 'a' — spans 16 blocks (NIST vector).
+    expect(sha256Hex('a'.repeat(1000))).toBe('41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3')
+    expect(sha256Hex('中文输入')).toHaveLength(64)
+    expect(sha256Hex('中文输入')).not.toBe(sha256Hex('中文输人'))
   })
 })
 

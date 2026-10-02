@@ -21,7 +21,7 @@ describe('validateConfig', () => {
   })
 
   it('enforces the {keyName} placeholder on the provider-name template (C5)', () => {
-    expect(() => validateConfig({ ...base(), providerNameTemplate: 'NexaRelay' })).toThrowError(/\{keyName\}/)
+    expect(() => validateConfig({ ...base(), providerNameTemplate: 'NexaRelay' })).toThrowError(/\{keyName\}|\{siteName\}/)
     expect(() => validateConfig({ ...base(), providerNameTemplate: '' })).not.toThrow()
   })
 

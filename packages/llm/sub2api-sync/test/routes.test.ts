@@ -65,7 +65,6 @@ function depsStub(overrides: Partial<RouteDeps> = {}): RouteDeps {
     login: async () => ({ ok: true, kind: 'ok' }),
     login2FA: async () => undefined,
     logout: async () => undefined,
-    setPat: async () => ({ ok: true, groups: 3 }),
     listGroups: async () => [
       { id: 2, name: 'codex-稳定[号池]', platform: 'openai', status: 'active', rateMultiplier: 0.2, enabled: true },
       { id: 4, name: 'claude-max[号池]', platform: 'anthropic', status: 'active', rateMultiplier: 1.5, enabled: false },
@@ -82,9 +81,19 @@ function depsStub(overrides: Partial<RouteDeps> = {}): RouteDeps {
       pages: 2,
     }),
     createKey: async (input) => ({ id: 43, name: input.name, groupId: input.groupId, status: 'active' }),
+    icon: async () => undefined,
+    siteName: async () => undefined,
+    account: async () => undefined,
+    resetSync: async () => undefined,
+    removeSyncedKey: async () => undefined,
     isSyncRunning: () => false,
     ownedRoutes: () => [{ route: 'sub2api-2', displayName: 'NexaRelay(key)', api: 'openai-responses', models: 3, modelsPreview: ['m-1', 'm-2', 'm-3'] }],
     allowRemote: () => false,
+    oauthProbe: async () => false,
+    oauthStart: async () => ({ attemptId: 'a-1', authorizeUrl: 'http://panel:9000/api/v1/oauth/authorize?x=1' }),
+    oauthCallback: async () => ({ html: '<!doctype html><html><body>ok</body></html>' }),
+    oauthStatus: async () => ({ ok: true, attempt: undefined, auth: { signedIn: false, kind: 'none' } }),
+    oauthCancel: async () => undefined,
   }
   return Object.assign(base, overrides)
 }
@@ -170,15 +179,6 @@ describe('routes', () => {
     expect(ok.body).toEqual({ ok: true, kind: 'ok' })
   })
 
-  it('validates the PAT and reports the visible group count', async () => {
-    const { ctx, handlers } = fakeCtx()
-    registerRoutes(ctx, depsStub())
-    const missing = await call(handlers, ROUTES.pat, { method: 'POST', body: {} })
-    expect(missing.status).toBe(400)
-    const ok = await call(handlers, ROUTES.pat, { method: 'POST', body: { token: 'sk-…' } })
-    expect(ok.body).toEqual({ ok: true, groups: 3 })
-  })
-
   it('annotates groups with the checked and keyId state', async () => {
     const { ctx, handlers } = fakeCtx()
     registerRoutes(ctx, depsStub())
@@ -243,5 +243,218 @@ describe('keys routes', () => {
     const ok = await call(handlers, ROUTES.keys, { method: 'POST', body: { groupId: 2, name: 'claude-max[号池]' } })
     expect(ok.status).toBe(200)
     expect(ok.body?.key).toMatchObject({ id: 43, name: 'claude-max[号池]', groupId: 2 })
+  })
+})
+
+describe('icon route', () => {
+  async function callRaw(handlers: Map<string, RouteHandler>, path: string, method = 'GET'): Promise<{ status: number; body: string | Buffer }> {
+    const handler = handlers.get(path)
+    if (handler === undefined) throw new Error(`route not registered: ${path}`)
+    const res = response()
+    await handler(request({ url: path, method }), res)
+    return { status: res.status, body: (res as { body: string | Buffer }).body }
+  }
+
+  it('streams the icon bytes with the upstream content type', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub({
+      icon: async () => ({ contentType: 'image/svg+xml', body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>') }),
+    }))
+    const { status, body } = await callRaw(handlers, ROUTES.icon)
+    expect(status).toBe(200)
+    expect(String(body)).toContain('<svg')
+  })
+
+  it('answers 404 when the instance exposes no icon', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub())
+    const { status } = await callRaw(handlers, ROUTES.icon)
+    expect(status).toBe(404)
+  })
+
+  it('rejects non-GET and untrusted peers', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub())
+    const post = await callRaw(handlers, ROUTES.icon, 'POST')
+    expect(post.status).toBe(405)
+    const remoteHandler = handlers.get(ROUTES.icon)
+    const res = response()
+    await remoteHandler!(request({ url: ROUTES.icon, remote: '8.8.8.8' }), res)
+    expect(res.status).toBe(403)
+  })
+})
+
+describe('site route', () => {
+  it('serves the instance site name when the probe resolves one', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub({ siteName: async () => '我的中转' }))
+    const { status, body } = await call(handlers, ROUTES.site)
+    expect(status).toBe(200)
+    expect(body).toEqual({ ok: true, name: '我的中转' })
+  })
+
+  it('answers a null name when the instance exposes none', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub())
+    const { status, body } = await call(handlers, ROUTES.site)
+    expect(status).toBe(200)
+    expect(body).toEqual({ ok: true, name: undefined })
+  })
+
+  it('keeps answering when the probe throws', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub({ siteName: async () => { throw new Error('boom') } }))
+    const { status, body } = await call(handlers, ROUTES.site)
+    expect(status).toBe(200)
+    expect(body).toEqual({ ok: true, name: undefined })
+  })
+})
+
+describe('account route', () => {
+  it('serves the signed-in account identity', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub({ account: async () => ({ username: 'zs', email: 'zs@example.com', balance: 3.2 }) }))
+    const { status, body } = await call(handlers, ROUTES.account)
+    expect(status).toBe(200)
+    expect(body).toEqual({ ok: true, username: 'zs', email: 'zs@example.com', balance: 3.2 })
+  })
+
+  it('answers empty fields when unavailable and rides upstream errors as `error`', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub({ account: async () => undefined }))
+    const { status, body } = await call(handlers, ROUTES.account)
+    expect(status).toBe(200)
+    expect(body).toEqual({ ok: true })
+    const failing = fakeCtx()
+    registerRoutes(failing.ctx, depsStub({ account: async () => { throw new Error('面板 GET /auth/me: HTTP 403') } }))
+    const failed = await call(failing.handlers, ROUTES.account)
+    expect(failed.status).toBe(200)
+    expect(failed.body).toEqual({ ok: true, error: '面板 GET /auth/me: HTTP 403' })
+  })
+})
+
+describe('oauthProbe route', () => {
+  it('probes the given address and answers its supported verdict', async () => {
+    const { ctx, handlers } = fakeCtx()
+    const seen: string[] = []
+    registerRoutes(ctx, depsStub({ oauthProbe: async (address) => { seen.push(address); return address === 'http://good:8080' } }))
+    const good = await call(handlers, ROUTES.oauthProbe, { url: `${ROUTES.oauthProbe}?address=${encodeURIComponent('http://good:8080')}` })
+    expect(good.body).toEqual({ ok: true, supported: true })
+    const bad = await call(handlers, ROUTES.oauthProbe, { url: `${ROUTES.oauthProbe}?address=${encodeURIComponent('http://old:8080')}` })
+    expect(bad.body).toEqual({ ok: true, supported: false })
+    expect(seen).toEqual(['http://good:8080', 'http://old:8080'])
+  })
+
+  it('answers unsupported for a non-http address without probing', async () => {
+    const { ctx, handlers } = fakeCtx()
+    const seen: string[] = []
+    registerRoutes(ctx, depsStub({ oauthProbe: async (address) => { seen.push(address); return true } }))
+    const result = await call(handlers, ROUTES.oauthProbe, { url: `${ROUTES.oauthProbe}?address=${encodeURIComponent('ftp://x')}` })
+    expect(result.body).toEqual({ ok: true, supported: false })
+    expect(seen).toEqual([])
+  })
+
+  it('keeps answering when the probe throws', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub({ oauthProbe: async () => { throw new Error('boom') } }))
+    const result = await call(handlers, ROUTES.oauthProbe, { url: `${ROUTES.oauthProbe}?address=${encodeURIComponent('http://x:1')}` })
+    expect(result.status).toBe(200)
+    expect(result.body).toEqual({ ok: true, supported: false })
+  })
+})
+
+describe('resetSync route', () => {
+  it('purges via the dep with the previous instance when given', async () => {
+    const { ctx, handlers } = fakeCtx()
+    const seen: Array<string | undefined> = []
+    registerRoutes(ctx, depsStub({ resetSync: async (previous) => { seen.push(previous) } }))
+    const none = await call(handlers, ROUTES.resetSync, { method: 'POST', body: {} })
+    expect(none.status).toBe(200)
+    expect(none.body).toEqual({ ok: true })
+    const withPrevious = await call(handlers, ROUTES.resetSync, { method: 'POST', body: { previousBaseURL: 'http://old:3000' } })
+    expect(withPrevious.status).toBe(200)
+    expect(seen).toEqual([undefined, 'http://old:3000'])
+  })
+
+  it('rejects non-POST and untrusted peers', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub())
+    const get = await call(handlers, ROUTES.resetSync)
+    expect(get.status).toBe(405)
+    const handler = handlers.get(ROUTES.resetSync)
+    const res = response()
+    await handler!(request({ url: ROUTES.resetSync, method: 'POST', remote: '8.8.8.8' }), res)
+    expect(res.status).toBe(403)
+  })
+
+  it('answers 500 when the purge fails', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub({ resetSync: async () => { throw new Error('settings unavailable') } }))
+    const failed = await call(handlers, ROUTES.resetSync, { method: 'POST', body: {} })
+    expect(failed.status).toBe(500)
+    expect(failed.body).toMatchObject({ ok: false })
+  })
+})
+
+describe('removeKey route', () => {
+  it('dispatches the positive-integer keyId to the dep', async () => {
+    const { ctx, handlers } = fakeCtx()
+    const seen: number[] = []
+    registerRoutes(ctx, depsStub({ removeSyncedKey: async (keyId) => { seen.push(keyId) } }))
+    const ok = await call(handlers, ROUTES.removeKey, { method: 'POST', body: { keyId: 5 } })
+    expect(ok.status).toBe(200)
+    expect(ok.body).toEqual({ ok: true })
+    const numericString = await call(handlers, ROUTES.removeKey, { method: 'POST', body: { keyId: '7' } })
+    expect(numericString.status).toBe(200)
+    expect(seen).toEqual([5, 7])
+  })
+
+  it('rejects a missing or non-integer keyId', async () => {
+    const { ctx, handlers } = fakeCtx()
+    const seen: number[] = []
+    registerRoutes(ctx, depsStub({ removeSyncedKey: async (keyId) => { seen.push(keyId) } }))
+    const missing = await call(handlers, ROUTES.removeKey, { method: 'POST', body: {} })
+    expect(missing.status).toBe(400)
+    const zero = await call(handlers, ROUTES.removeKey, { method: 'POST', body: { keyId: 0 } })
+    expect(zero.status).toBe(400)
+    const float = await call(handlers, ROUTES.removeKey, { method: 'POST', body: { keyId: 1.5 } })
+    expect(float.status).toBe(400)
+    expect(seen).toEqual([])
+  })
+
+  it('rejects non-POST, untrusted peers, and dep failures', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub())
+    const get = await call(handlers, ROUTES.removeKey)
+    expect(get.status).toBe(405)
+    const handler = handlers.get(ROUTES.removeKey)
+    const res = response()
+    await handler!(request({ url: ROUTES.removeKey, method: 'POST', remote: '8.8.8.8' }), res)
+    expect(res.status).toBe(403)
+
+    const { ctx: failCtx, handlers: failHandlers } = fakeCtx()
+    registerRoutes(failCtx, depsStub({ removeSyncedKey: async () => { throw new Error('settings unavailable') } }))
+    const failed = await call(failHandlers, ROUTES.removeKey, { method: 'POST', body: { keyId: 5 } })
+    expect(failed.status).toBe(500)
+    expect(failed.body).toMatchObject({ ok: false, error: 'settings unavailable' })
+  })
+})
+
+describe('oauthCallback route locale', () => {
+  it('derives the page locale from the request Accept-Language and hands it to the dep', async () => {
+    const { ctx, handlers } = fakeCtx()
+    const langs: string[] = []
+    registerRoutes(ctx, depsStub({
+      oauthCallback: async (_query, lang) => { langs.push(lang) ; return { html: '<!doctype html><html><body>ok</body></html>' } },
+    }))
+    const handler = handlers.get(ROUTES.oauthCallback)
+    expect(handler).toBeDefined()
+    // The route answers HTML, so invoke the handler directly (call() parses JSON).
+    const run = (acceptLanguage?: string): Promise<void> =>
+      handler!(request({ url: `${ROUTES.oauthCallback}?code=x&state=y`, headers: acceptLanguage === undefined ? {} : { 'accept-language': acceptLanguage } }), response()).then(() => undefined)
+    await run('zh-CN,zh;q=0.9,en;q=0.8')
+    await run('en-US,en;q=0.9')
+    await run()
+    expect(langs).toEqual(['zh', 'en', 'zh'])
   })
 })

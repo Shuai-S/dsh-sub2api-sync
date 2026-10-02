@@ -5,7 +5,7 @@
  * rev.4 split: configuration reads/writes ride the platform's
  * `configForms`/settings seam — the old whole-section `/config` route is
  * gone. These routes carry only **actions, secrets, and state projection**:
- * login (password/2FA), PAT, panel group/key listing, paste/clear of a
+ * login (password/2FA), panel group/key listing, paste/clear of a
  * relay key, sync, model discovery, and the status snapshot.
  *
  * Requests are restricted to trusted local origins — the same
@@ -24,8 +24,18 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { SyncReport } from './engine.ts'
+import type { IconPayload } from './icon.ts'
 import type { AuthKind } from './panel.ts'
+import type { CallbackLang } from './oauth.ts'
 import { isOwnedRoute } from './types.ts'
+
+/** The hand-back page's locale from the callback request's Accept-Language:
+ * the first tag decides (`en*` → en, anything else → zh — matching the
+ * browser's preference order without full q-value negotiation). */
+export function callbackLangOf(acceptLanguage: string | undefined): CallbackLang {
+  const first = acceptLanguage?.split(',')[0]?.trim().toLowerCase() ?? ''
+  return first.startsWith('en') ? 'en' : 'zh'
+}
 
 export const ROUTES = {
   sync: '/plugins/dsh-sub2api-sync/sync',
@@ -33,9 +43,18 @@ export const ROUTES = {
   login: '/plugins/dsh-sub2api-sync/login',
   login2fa: '/plugins/dsh-sub2api-sync/login/2fa',
   logout: '/plugins/dsh-sub2api-sync/logout',
-  pat: '/plugins/dsh-sub2api-sync/pat',
   groups: '/plugins/dsh-sub2api-sync/groups',
   keys: '/plugins/dsh-sub2api-sync/keys',
+  icon: '/plugins/dsh-sub2api-sync/icon',
+  site: '/plugins/dsh-sub2api-sync/site',
+  account: '/plugins/dsh-sub2api-sync/account',
+  resetSync: '/plugins/dsh-sub2api-sync/reset-sync',
+  removeKey: '/plugins/dsh-sub2api-sync/remove-key',
+  oauthStart: '/plugins/dsh-sub2api-sync/oauth/start',
+  oauthProbe: '/plugins/dsh-sub2api-sync/oauth/probe',
+  oauthCallback: '/plugins/dsh-sub2api-sync/oauth/callback',
+  oauthStatus: '/plugins/dsh-sub2api-sync/oauth/status',
+  oauthCancel: '/plugins/dsh-sub2api-sync/oauth/cancel',
 } as const
 
 /** One relay key as the keys card renders it (metadata only, no plaintext). */
@@ -80,6 +99,9 @@ export interface StatusRoute {
   api?: string
   models: number
   modelsPreview: string[]
+  /** The panel key id behind this route (from the engine's route→id map);
+   * absent for routes synced before the map existed. */
+  keyId?: number
 }
 
 export interface StatusResponse {
@@ -112,20 +134,71 @@ export interface GroupsResponse {
   groups: GroupsView[]
 }
 
+/** `POST /reset-sync` — purge the plugin's sync state (instance switch). */
+export interface ResetSyncResponse {
+  ok: true
+}
+
+/** `POST /remove-key` — remove one key's synced provider (report entry button). */
+export interface RemoveKeyResponse {
+  ok: true
+}
+
+/** `GET /site` — the instance's configured site name (undefined when unknown). */
+export interface SiteResponse {
+  ok: true
+  name?: string
+}
+
+/** `GET /account` — the signed-in panel account's identity (header rendering). */
+export interface AccountResponse {
+  ok: true
+  /** The account's set username, when one exists. */
+  username?: string
+  /** The account's email (raw — the card masks it before display). */
+  email?: string
+  /** The account's balance in USD (header pill; absent when not numeric). */
+  balance?: number
+  /** The upstream failure reason when the profile could not be fetched
+   * (the header is cosmetic and falls back, but the cause must be visible). */
+  error?: string
+}
+
 export interface LoginResponse {
   ok: true
   kind: 'ok' | '2fa'
   requires2FA?: boolean
 }
 
-export interface PatResponse {
+/** `GET /oauth/probe?address=…` — whether the instance publishes OAuth
+ * discovery metadata (the sign-in dialog auto-selects its channel from it). */
+export interface OAuthProbeResponse {
   ok: true
-  groups: number
+  supported: boolean
 }
 
 export interface SyncResponse {
   ok: true
   report: SyncReport
+}
+
+/** `POST /oauth/start` — one authorization attempt, opened in a new tab. */
+export interface OAuthStartResponse {
+  ok: true
+  attemptId: string
+  authorizeUrl: string
+}
+
+/** `GET /oauth/status?attempt=<id>` — dialog poll for the web channel. */
+export interface OAuthAttemptStatusResponse {
+  ok: true
+  attempt: { phase: 'pending' | 'completed' | 'failed'; error?: string } | undefined
+  auth: AuthView
+}
+
+/** `POST /oauth/cancel` — drop a pending attempt. */
+export interface OAuthCancelResponse {
+  ok: true
 }
 
 /**
@@ -188,6 +261,24 @@ function json(res: ServerResponse, status: number, value: unknown): void {
   res.end(JSON.stringify(value))
 }
 
+/** The browser-facing hand-back page for the provider's redirect. */
+function html(res: ServerResponse, body: string): void {
+  res.writeHead(200, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  })
+  res.end(body)
+}
+
+/** The harness origin this request arrived on (host + proto, no path). */
+function requestOrigin(req: IncomingMessage): string {
+  const forwarded = req.headers['x-forwarded-proto']
+  const proto = (Array.isArray(forwarded) ? forwarded[0] : forwarded) ?? 'http'
+  const host = req.headers.host ?? '127.0.0.1'
+  return `${proto}://${host}`
+}
+
 function safeMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -208,8 +299,6 @@ export interface RouteDeps {
   login2FA(code: string): Promise<void>
   /** Drop panel tokens. */
   logout(): Promise<void>
-  /** Validate + store a PAT; returns how many groups it can see. */
-  setPat(token: string): Promise<PatResponse>
   /** Live panel groups annotated with the card's checked/keyId state. */
   listGroups(): Promise<GroupsView[]>
   /** One group's relay keys, metadata only (no plaintext). */
@@ -224,11 +313,43 @@ export interface RouteDeps {
   listKeys(page: number, pageSize: number): Promise<KeysListPage>
   /** Create one relay key (name defaults to the group name upstream of this seam). */
   createKey(input: { groupId: number; name: string }): Promise<PanelKeyMeta>
+  /** The instance's icon bytes (declared `<link rel=icon>` → /favicon.ico), or undefined. */
+  icon(): Promise<IconPayload | undefined>
+  /** The instance's configured site name (parsed from its HTML title), or undefined. */
+  siteName(): Promise<string | undefined>
+  /** The signed-in panel account's identity (username/email/balance), or undefined when unavailable. */
+  account(): Promise<{ username?: string; email?: string; balance?: number } | undefined>
+  /**
+   * Purge this plugin's sync state: remove every owned provider route and
+   * its relay-key credential, plus (when `previousBaseURL` is given) the
+   * old instance's unreachable panel secrets. The card calls it on instance
+   * switch; logout and auth-loss purge inside the host.
+   */
+  resetSync(previousBaseURL?: string): Promise<void>
+  /**
+   * Remove one key's synced provider: the route derived from the current
+   * instance + `keyId` leaves the llm-pi-ai section and its relay-key
+   * credential is dropped. Local state only — no panel calls, and the
+   * selection drop happens card-side so the next sync cannot resurrect it.
+   */
+  removeSyncedKey(keyId: number): Promise<void>
   isSyncRunning(): boolean
   /** Owned routes currently registered in the llm-pi-ai section. */
   ownedRoutes(): StatusRoute[]
   /** Whether the cross-device escape hatch is on (Config, default false). */
   allowRemote(): boolean
+  /** Begin one OAuth authorization attempt bound to this harness origin. */
+  oauthStart(callbackOrigin: string): Promise<{ attemptId: string; authorizeUrl: string }>
+  /** Whether the given instance address publishes OAuth discovery metadata
+   * (host-side fetch — the browser cannot probe cross-origin). */
+  oauthProbe(address: string): Promise<boolean>
+  /** Consume the provider's browser redirect: match state, exchange the code.
+   * `lang` is the callback request's Accept-Language locale for the page. */
+  oauthCallback(query: URLSearchParams, lang: CallbackLang): Promise<{ html: string }>
+  /** Project one attempt's phase plus the current auth snapshot. */
+  oauthStatus(attemptId: string | undefined): Promise<OAuthAttemptStatusResponse>
+  /** Drop a pending attempt (user cancelled the dialog). */
+  oauthCancel(attemptId: string): Promise<void>
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>
@@ -332,24 +453,6 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
       }
     })
 
-    route(ROUTES.pat, async (req, res) => {
-      if (!guard(req, res)) return
-      if (!method('POST', req, res)) return
-      let body: Record<string, unknown>
-      try {
-        body = await readJson(req)
-      } catch {
-        return json(res, 400, { error: 'invalid JSON body' })
-      }
-      const token = typeof body.token === 'string' ? body.token.trim() : ''
-      if (token.length === 0) return json(res, 400, { error: 'token 必填' })
-      try {
-        json(res, 200, await deps.setPat(token))
-      } catch (error) {
-        json(res, 400, { ok: false, error: safeMessage(error) })
-      }
-    })
-
     route(ROUTES.groups, async (req, res) => {
       if (!guard(req, res)) return
       if (!method('GET', req, res)) return
@@ -388,7 +491,163 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
         json(res, 400, { ok: false, error: safeMessage(error) })
       }
     })
+
+    // Same-origin icon proxy: the webview loads plugin-route imagery only;
+    // the host resolves the instance's declared icon and streams the bytes.
+    // An unavailable icon answers 404 and the client falls back to its dot.
+    route(ROUTES.icon, async (req, res) => {
+      if (!guard(req, res)) return
+      if (!method('GET', req, res)) return
+      const icon = await deps.icon().catch(() => undefined)
+      if (icon === undefined) return json(res, 404, { error: 'icon unavailable' })
+      res.writeHead(200, {
+        'content-type': icon.contentType,
+        'cache-control': 'private, max-age=600',
+        'x-content-type-options': 'nosniff',
+      })
+      res.end(icon.body)
+    })
+
+    // The instance's configured site name for the identity header. Never
+    // throws: an unknown name answers undefined and the card keeps its
+    // static fallback label.
+    route(ROUTES.site, async (req, res) => {
+      if (!guard(req, res)) return
+      if (!method('GET', req, res)) return
+      const name = await deps.siteName().catch(() => undefined)
+      json(res, 200, { ok: true, name } satisfies SiteResponse)
+    })
+
+    // The signed-in account's identity for the header (username, else the
+    // card-side masked email). An upstream failure rides the response as
+    // `error` — the header still falls back, but diagnosably.
+    route(ROUTES.account, async (req, res) => {
+      if (!guard(req, res)) return
+      if (!method('GET', req, res)) return
+      try {
+        const profile = await deps.account()
+        json(res, 200, {
+          ok: true,
+          ...(profile?.username !== undefined ? { username: profile.username } : {}),
+          ...(profile?.email !== undefined ? { email: profile.email } : {}),
+          ...(profile?.balance !== undefined ? { balance: profile.balance } : {}),
+        } satisfies AccountResponse)
+      } catch (error) {
+        json(res, 200, { ok: true, error: safeMessage(error) } satisfies AccountResponse)
+      }
+    })
+
+    // Instance-switch purge: the card detects a baseURL change and hands the
+    // previous address over so its unreachable panel secrets are dropped too.
+    route(ROUTES.resetSync, async (req, res) => {
+      if (!guard(req, res)) return
+      if (!method('POST', req, res)) return
+      try {
+        const body = await readJson(req) as { previousBaseURL?: unknown }
+        const previous = typeof body.previousBaseURL === 'string' && body.previousBaseURL.length > 0
+          ? body.previousBaseURL
+          : undefined
+        await deps.resetSync(previous)
+        json(res, 200, { ok: true } satisfies ResetSyncResponse)
+      } catch (error) {
+        json(res, 500, { ok: false, error: safeMessage(error) })
+      }
+    })
+
+    // Per-entry removal from the sync report: one key's provider route and
+    // credential go away without a full re-sync (which the panel could
+    // refuse — removal is local state and must not depend on it).
+    route(ROUTES.removeKey, async (req, res) => {
+      if (!guard(req, res)) return
+      if (!method('POST', req, res)) return
+      try {
+        const body = await readJson(req) as { keyId?: unknown }
+        const keyId = parseGroupIdFrom(body.keyId)
+        if (keyId === undefined) return json(res, 400, { ok: false, error: 'keyId 必须是正整数 key id' })
+        await deps.removeSyncedKey(keyId)
+        json(res, 200, { ok: true } satisfies RemoveKeyResponse)
+      } catch (error) {
+        json(res, 500, { ok: false, error: safeMessage(error) })
+      }
+    })
+
+    // ==== OAuth web channel (C2) ====
+
+    route(ROUTES.oauthStart, async (req, res) => {
+      if (!guard(req, res)) return
+      if (!method('POST', req, res)) return
+      try {
+        const started = await deps.oauthStart(requestOrigin(req))
+        json(res, 200, { ok: true, attemptId: started.attemptId, authorizeUrl: started.authorizeUrl } satisfies OAuthStartResponse)
+      } catch (error) {
+        json(res, 400, { ok: false, error: safeMessage(error) })
+      }
+    })
+
+    // OAuth channel auto-detection for the sign-in dialog: never throws —
+    // a failed discovery answers supported:false and the dialog keeps the
+    // password channel.
+    route(ROUTES.oauthProbe, async (req, res) => {
+      if (!guard(req, res)) return
+      if (!method('GET', req, res)) return
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const address = url.searchParams.get('address') ?? ''
+      let supported = false
+      if (/^https?:\/\//i.test(address.trim())) {
+        supported = await deps.oauthProbe(address).catch(() => false)
+      }
+      json(res, 200, { ok: true, supported } satisfies OAuthProbeResponse)
+    })
+
+    // The callback is the provider's browser redirect — a cross-site
+    // navigation by design. `trustedRequest` therefore does NOT apply; the
+    // one-shot `state` binding is what makes forged callbacks useless.
+    route(ROUTES.oauthCallback, async (req, res) => {
+      if (!method('GET', req, res)) return
+      try {
+        const query = new URL(req.url ?? '/', 'http://localhost').searchParams
+        const answer = await deps.oauthCallback(query, callbackLangOf(req.headers['accept-language']))
+        html(res, answer.html)
+      } catch (error) {
+        html(res, oauthFailurePage(safeMessage(error)))
+      }
+    })
+
+    route(ROUTES.oauthStatus, async (req, res) => {
+      if (!guard(req, res)) return
+      if (!method('GET', req, res)) return
+      try {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const attemptId = url.searchParams.get('attempt') ?? undefined
+        json(res, 200, await deps.oauthStatus(attemptId) satisfies OAuthAttemptStatusResponse)
+      } catch (error) {
+        json(res, 400, { ok: false, error: safeMessage(error) })
+      }
+    })
+
+    route(ROUTES.oauthCancel, async (req, res) => {
+      if (!guard(req, res)) return
+      if (!method('POST', req, res)) return
+      try {
+        const body = await readJson(req) as { attemptId?: unknown }
+        if (typeof body.attemptId !== 'string' || body.attemptId.length === 0) {
+          return json(res, 400, { ok: false, error: 'attemptId 必填' })
+        }
+        await deps.oauthCancel(body.attemptId)
+        json(res, 200, { ok: true } satisfies OAuthCancelResponse)
+      } catch (error) {
+        json(res, 400, { ok: false, error: safeMessage(error) })
+      }
+    })
   })
+}
+
+/** Standalone failure page when the callback handler itself throws. Inline on
+ * purpose: routes.ts rides the client bundle, so it must not value-import
+ * the host-only oauth module. */
+function oauthFailurePage(message: string): string {
+  const detail = message.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`)
+  return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>授权失败 · Authorization failed</title></head><body><main><h1>授权失败 · Authorization failed</h1><p>${detail}</p></main></body></html>`
 }
 
 /** Shared group-id parser over route input (number or decimal string). */

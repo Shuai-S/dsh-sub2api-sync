@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { PanelClient, PanelError, PanelGateway } from '../src/panel.ts'
-import { panelRefreshRef, panelTokenRef, type CredentialsLike } from '../src/types.ts'
+import { oauthRefreshRef, oauthTokenRef, panelRefreshRef, panelTokenRef, type CredentialsLike } from '../src/types.ts'
 
 const BASE = 'http://panel:9000'
 
@@ -67,6 +67,33 @@ function ok(data: unknown): FakeResponse {
 }
 
 describe('PanelClient', () => {
+  it('reads the account profile: username and email, empties dropped', async () => {
+    const { fetchImpl, calls } = makeServer((call) => {
+      expect(call.method).toBe('GET')
+      expect(call.path).toBe('/api/v1/auth/me')
+      expect(call.token).toBe('token-1')
+      return ok({ id: 1, email: ' user@example.com ', username: '  ', role: 'user' })
+    })
+    const client = new PanelClient({ baseURL: BASE, fetchImpl })
+    const profile = await client.getProfile('token-1')
+    expect(profile).toEqual({ email: 'user@example.com' })
+  })
+
+  it('answers an empty profile when the account has neither username nor email', async () => {
+    const { fetchImpl } = makeServer(() => ok({ id: 2 }))
+    const client = new PanelClient({ baseURL: BASE, fetchImpl })
+    expect(await client.getProfile('token-1')).toEqual({})
+  })
+
+  it('carries the numeric balance through and drops non-numeric shapes', async () => {
+    const withBalance = makeServer(() => ok({ id: 3, email: 'a@b.c', balance: 12.5 }))
+    expect(await new PanelClient({ baseURL: BASE, fetchImpl: withBalance.fetchImpl }).getProfile('t')).toEqual({
+      email: 'a@b.c',
+      balance: 12.5,
+    })
+    const without = makeServer(() => ok({ id: 4, balance: '12.50' }))
+    expect(await new PanelClient({ baseURL: BASE, fetchImpl: without.fetchImpl }).getProfile('t')).toEqual({ email: undefined })
+  })
   it('classifies a successful password login and carries the token pair', async () => {
     const { fetchImpl, calls } = makeServer((call) => {
       expect(call.path).toBe('/api/v1/auth/login')
@@ -198,24 +225,6 @@ describe('PanelGateway', () => {
     expect(await creds.resolve(panelTokenRef(BASE))).toEqual({ value: 'at-2' })
   })
 
-  it('validates a PAT against groups/available before storing it', async () => {
-    const creds = new FakeCreds()
-    const { fetchImpl } = makeServer((call) => {
-      if (call.path === '/api/v1/groups/available') {
-        return call.token === 'good-pat' ? ok([{ id: 1, name: 'g', platform: 'openai' }]) : { status: 200, body: { code: 401, message: '无效令牌' } }
-      }
-      return undefined
-    })
-    const gateway = new PanelGateway({ baseURL: BASE, credentials: creds, fetchImpl })
-    await expect(gateway.setPat('bad-pat')).rejects.toThrowError(/无效令牌/)
-    expect(await creds.resolve(panelTokenRef(BASE))).toBeUndefined()
-    const groups = await gateway.setPat('good-pat')
-    expect(groups).toHaveLength(1)
-    expect(await creds.resolve(panelTokenRef(BASE))).toEqual({ value: 'good-pat' })
-    expect(await creds.resolve(panelRefreshRef(BASE))).toBeUndefined()
-    expect(await gateway.authState()).toEqual({ signedIn: true, kind: 'pat' })
-  })
-
   it('fails an authed call loudly when signed out', async () => {
     const { fetchImpl } = makeServer(() => ok([]))
     const gateway = new PanelGateway({ baseURL: BASE, credentials: new FakeCreds(), fetchImpl })
@@ -284,10 +293,54 @@ describe('PanelGateway', () => {
       if (call.path === '/api/v1/auth/refresh') return { status: 200, body: { code: 401, message: 'refresh rejected' } }
       return undefined
     })
-    const gateway = new PanelGateway({ baseURL: BASE, credentials: creds, fetchImpl })
+    const onAuthLost = vi.fn()
+    const gateway = new PanelGateway({ baseURL: BASE, credentials: creds, fetchImpl, onAuthLost })
     await expect(gateway.use((panel, token) => panel.listKeys(token))).rejects.toThrowError(/刷新失败/)
     expect(await creds.resolve(panelTokenRef(BASE))).toBeUndefined()
     expect(await creds.resolve(panelRefreshRef(BASE))).toBeUndefined()
+    expect(onAuthLost).toHaveBeenCalledTimes(1)
+  })
+
+  it('fires onAuthLost when no refresh token remains (password channel)', async () => {
+    const creds = new FakeCreds()
+    creds.seed(panelTokenRef(BASE), 'stale')
+    const { fetchImpl } = makeServer((call) => {
+      if (call.path.startsWith('/api/v1/keys')) return { status: 401, body: { code: 401, message: 'expired' } }
+      return undefined
+    })
+    const onAuthLost = vi.fn()
+    const gateway = new PanelGateway({ baseURL: BASE, credentials: creds, fetchImpl, onAuthLost })
+    await expect(gateway.use((panel, token) => panel.listKeys(token))).rejects.toThrowError(/无 refresh token/)
+    expect(onAuthLost).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not fire onAuthLost when the panel is merely unreachable', async () => {
+    const creds = new FakeCreds()
+    creds.seed(panelTokenRef(BASE), 'stale')
+    creds.seed(panelRefreshRef(BASE), 'live')
+    const fetchImpl = (async () => { throw new Error('ECONNREFUSED') }) as unknown as typeof fetch
+    const onAuthLost = vi.fn()
+    const gateway = new PanelGateway({ baseURL: BASE, credentials: creds, fetchImpl, onAuthLost })
+    await expect(gateway.use((panel, token) => panel.listKeys(token))).rejects.toThrowError()
+    expect(onAuthLost).not.toHaveBeenCalled()
+  })
+
+  it('fires onAuthLost when the OAuth refresh is refused', async () => {
+    const creds = new FakeCreds()
+    creds.seed(oauthTokenRef(BASE), 'stale-oauth')
+    creds.seed(oauthRefreshRef(BASE), 'dead-oauth')
+    const { fetchImpl } = makeServer((call) => {
+      if (call.path.startsWith('/api/v1/keys')) return { status: 401, body: { code: 401, message: 'expired' } }
+      // Discovery candidates and the token endpoint refuse too — the refresh
+      // itself fails, which is a definitive auth loss.
+      return { status: 401, body: { code: 401, message: 'rejected' } }
+    })
+    const onAuthLost = vi.fn()
+    const gateway = new PanelGateway({ baseURL: BASE, credentials: creds, fetchImpl, onAuthLost })
+    await expect(gateway.use((panel, token) => panel.listKeys(token))).rejects.toThrowError(/OAuth 登录已过期/)
+    expect(onAuthLost).toHaveBeenCalledTimes(1)
+    expect(await creds.resolve(oauthTokenRef(BASE))).toBeUndefined()
+    expect(await creds.resolve(oauthRefreshRef(BASE))).toBeUndefined()
   })
 
   it('clears tokens on logout but keeps the stored password', async () => {
