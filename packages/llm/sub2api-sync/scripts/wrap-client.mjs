@@ -18,7 +18,12 @@ const filename = ['client.cjs', 'client.js']
     }
   })
 if (filename === undefined) throw new Error('tsdown did not emit lib/client.js or lib/client.cjs')
-const source = readFileSync(filename, 'utf8')
+let source = readFileSync(filename, 'utf8')
+// Identity injection: replace the build-time placeholder with this build's
+// package name, read from package.json (pack-all.mjs rewrites it per variant
+// before `pnpm pack` triggers this script). Keeps PKG_NAME (client slot keys,
+// detail-page filter) consistent with the wrapper id below.
+source = source.replace(/__DSH_PLUGIN_NAME__/g, JSON.stringify(pkgName))
 const out = join(lib, 'client.js')
 if (source.includes('window.__ModuleLoader__')) {
   if (filename !== out) writeFileSync(out, source)

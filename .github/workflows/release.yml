@@ -1,0 +1,81 @@
+# Dual-channel release: GitHub Release (tgz) + npm publish.
+#
+# Trigger: push a tag named after the plugin version, e.g. v0.1.0:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Required secret: NPM_TOKEN — an npm token from the mangoc account with
+# publish rights to BOTH @mangoc/dsh-sub2api-sync (its own scope) and the
+# unscoped alias dsh-sub2api-sync (npmjs.com → Access Tokens → Generate).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # create the GitHub Release and upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm (version pinned in root package.json)
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify tag matches plugin version
+        run: |
+          PKG_VERSION=$(node -p "require('./packages/llm/sub2api-sync/package.json').version")
+          if [ "v$PKG_VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match plugin version v$PKG_VERSION."
+            echo "Bump packages/llm/sub2api-sync/package.json version, then tag again."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check (typecheck + test + build)
+        run: pnpm check
+
+      - name: Pack both published names
+        run: |
+          cd packages/llm/sub2api-sync
+          node scripts/pack-all.mjs --out "$GITHUB_WORKSPACE/dist"
+          # Stable-name copies so "releases/latest/download/<name>" URLs work.
+          cp "$GITHUB_WORKSPACE"/dist/mangoc-dsh-sub2api-sync-*.tgz \
+             "$GITHUB_WORKSPACE/dist/mangoc-dsh-sub2api-sync.tgz"
+          cp "$GITHUB_WORKSPACE"/dist/dsh-sub2api-sync-*.tgz \
+             "$GITHUB_WORKSPACE/dist/dsh-sub2api-sync.tgz"
+
+      - name: Create GitHub Release with tarball
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tgz \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+      - name: Publish to npm (scoped canonical + unscoped alias)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish "$GITHUB_WORKSPACE"/dist/mangoc-dsh-sub2api-sync-*.tgz \
+            --registry=https://registry.npmjs.org --access public
+          npm publish "$GITHUB_WORKSPACE"/dist/dsh-sub2api-sync-*.tgz \
+            --registry=https://registry.npmjs.org --access public

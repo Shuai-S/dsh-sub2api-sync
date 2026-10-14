@@ -1,4 +1,4 @@
-# @deepseek-ai/dsh-sub2api-sync
+# @mangoc/dsh-sub2api-sync
 
 Sync one [sub2api](https://github.com/Wei-Shaw/sub2api) instance's groups, keys, and models into [`dsh-llm-pi-ai`](https://github.com/deepseek-ai/deepseek-harness) provider routes: log in once, integrate automatically, keep syncing.
 
@@ -10,28 +10,79 @@ Phase 1 ships the key-first path: declare groups by hand in the settings card, p
 
 ## Install
 
+### User install (release channels)
+
 The harness loads this package through its `main`/`exports` entry, which is the
-**built** `lib/index.js` (`lib/` is gitignored and is not checked in). Build it
-first, or the loader reports `failed to import` / `did not activate` and the
-plugin never starts:
+**built** `lib/index.js`. Tarballs from any channel below ship `lib/` already —
+no local build needed:
+
+**npm** — published under two names simultaneously: same code, same version.
+The scoped name is canonical; the unscoped short name is an alias. Either
+installs as a first-class plugin:
+
+```sh
+dsh plugin --profile web add @mangoc/dsh-sub2api-sync   # canonical (scoped)
+dsh plugin --profile web add dsh-sub2api-sync           # alias (unscoped short name)
+```
+
+**GitHub Releases tarball** (no npm involved; the URLs always point to the
+latest release; both variants are equivalent):
+
+```sh
+dsh plugin --profile web add https://github.com/Shuai-S/sub2api-provider-sync/releases/latest/download/mangoc-dsh-sub2api-sync.tgz
+# or the short-name variant:
+dsh plugin --profile web add https://github.com/Shuai-S/sub2api-provider-sync/releases/latest/download/dsh-sub2api-sync.tgz
+```
+
+You can also copy a version-pinned tarball URL (e.g.
+`mangoc-dsh-sub2api-sync-0.1.0.tgz` / `dsh-sub2api-sync-0.1.0.tgz`) from the
+[Releases page](https://github.com/Shuai-S/sub2api-provider-sync/releases).
+
+**From source** (pnpm runs the `prepare` build on git dependencies; needs a
+local toolchain and is slower on first install):
+
+```sh
+dsh plugin --profile web add github:Shuai-S/sub2api-provider-sync#path:packages/llm/sub2api-sync
+```
+
+After installing, restart the app or toggle the plugin off/on so the entry is
+imported again; a failed entry is not retried on its own.
+
+### Release (maintainers)
+
+Every release publishes **both names in lockstep**
+([scripts/pack-all.mjs](scripts/pack-all.mjs)): one tarball for the scoped
+canonical name and one for the unscoped alias, sharing the same version. Each
+variant embeds its own plugin name at pack time (client-bundle `PKG_NAME`,
+ModuleLoader wrapper id, `cordis.patch.yml`), so both install independently.
+CI ([.github/workflows/release.yml](../../../.github/workflows/release.yml))
+runs the whole flow: bump `version` in
+`packages/llm/sub2api-sync/package.json` → commit →
+`git tag vX.Y.Z && git push origin vX.Y.Z` → `pnpm check` → two tarballs →
+GitHub Release (4 assets: 2 versioned + 2 stable-name copies) → npm dual
+publish (requires the repo secret `NPM_TOKEN`; `publishConfig.registry` is
+pinned to the official npmjs registry, immune to mirror configs). Manual dual
+publish from a local checkout:
+
+```sh
+pnpm pack:all    # emits both tarballs into dist/; repo files restored afterwards
+npm publish dist/mangoc-dsh-sub2api-sync-*.tgz --registry=https://registry.npmjs.org --access public
+npm publish dist/dsh-sub2api-sync-*.tgz --registry=https://registry.npmjs.org --access public
+```
+
+Publishing only the canonical package also works:
+`pnpm --filter @mangoc/dsh-sub2api-sync publish`.
+
+### Local development (linked checkout)
+
+`dsh plugin add` only symlinks a local directory (`link:`); it does **not**
+install or build the target, so building first is a hard precondition — not
+just a development convenience:
 
 ```sh
 pnpm install          # installs deps (runs the `prepare` build)
 pnpm build            # tsdown + client wrapper; emits lib/index.js and lib/client.js
-```
-
-Then link it into a profile. `dsh plugin add` only symlinks the directory
-(`link:`); it does **not** install or build the target, so the two commands
-above are a hard precondition — not just a development convenience:
-
-```sh
 dsh plugin --profile web add ./packages/llm/sub2api-sync
-```
-
-or from a published package once released (a tarball ships `lib/` already):
-
-```sh
-dsh plugin --profile web add @deepseek-ai/dsh-sub2api-sync
 ```
 
 After rebuilding, restart the app or toggle the plugin off/on so the entry is
@@ -97,9 +148,9 @@ Routes take effect on the next request. The route suffix is a SHA-256 truncation
 
 ```sh
 pnpm install
-pnpm --filter @deepseek-ai/dsh-sub2api-sync typecheck
-pnpm --filter @deepseek-ai/dsh-sub2api-sync test
-pnpm --filter @deepseek-ai/dsh-sub2api-sync build
+pnpm --filter @mangoc/dsh-sub2api-sync typecheck
+pnpm --filter @mangoc/dsh-sub2api-sync test
+pnpm --filter @mangoc/dsh-sub2api-sync build
 ```
 
 MIT

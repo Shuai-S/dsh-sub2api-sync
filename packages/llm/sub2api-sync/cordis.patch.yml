@@ -7,4 +7,4 @@
 
 - insert:
     - id: sub2api-sync
-      name: '@deepseek-ai/dsh-sub2api-sync'
+      name: '@mangoc/dsh-sub2api-sync'

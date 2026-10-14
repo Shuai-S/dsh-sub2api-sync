@@ -7,6 +7,11 @@ const nodeExternal = [
   'react/jsx-runtime',
 ]
 
+// The plugin's package name is NOT injected here: tsdown 0.4.4's `define`
+// does not reliably reach the client bundle. Identity injection (PKG_NAME +
+// ModuleLoader id) happens in scripts/wrap-client.mjs, which already owns the
+// wrapper and reads the (possibly variant-rewritten) package.json name.
+
 export default defineConfig([
   {
     entry: {

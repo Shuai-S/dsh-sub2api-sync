@@ -3,9 +3,10 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "packageManager": "pnpm@11.23.0",
   "scripts": {
-    "build": "pnpm --filter @deepseek-ai/dsh-sub2api-sync build",
-    "typecheck": "pnpm --filter @deepseek-ai/dsh-sub2api-sync typecheck",
+    "build": "pnpm --filter @mangoc/dsh-sub2api-sync build",
+    "typecheck": "pnpm --filter @mangoc/dsh-sub2api-sync typecheck",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
