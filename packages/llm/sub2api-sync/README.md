@@ -29,20 +29,20 @@ dsh plugin --profile web add dsh-sub2api-sync           # alias (unscoped short 
 latest release; both variants are equivalent):
 
 ```sh
-dsh plugin --profile web add https://github.com/Shuai-S/sub2api-provider-sync/releases/latest/download/mangoc-dsh-sub2api-sync.tgz
+dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/mangoc-dsh-sub2api-sync.tgz
 # or the short-name variant:
-dsh plugin --profile web add https://github.com/Shuai-S/sub2api-provider-sync/releases/latest/download/dsh-sub2api-sync.tgz
+dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/dsh-sub2api-sync.tgz
 ```
 
 You can also copy a version-pinned tarball URL (e.g.
 `mangoc-dsh-sub2api-sync-0.1.0.tgz` / `dsh-sub2api-sync-0.1.0.tgz`) from the
-[Releases page](https://github.com/Shuai-S/sub2api-provider-sync/releases).
+[Releases page](https://github.com/Shuai-S/dsh-sub2api-sync/releases).
 
 **From source** (pnpm runs the `prepare` build on git dependencies; needs a
 local toolchain and is slower on first install):
 
 ```sh
-dsh plugin --profile web add github:Shuai-S/sub2api-provider-sync#path:packages/llm/sub2api-sync
+dsh plugin --profile web add github:Shuai-S/dsh-sub2api-sync#path:packages/llm/sub2api-sync
 ```
 
 After installing, restart the app or toggle the plugin off/on so the entry is

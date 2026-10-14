@@ -4,13 +4,13 @@
   "version": "0.1.0",
   "license": "MIT",
   "author": "Shuai-S",
-  "homepage": "https://github.com/Shuai-S/sub2api-provider-sync#readme",
+  "homepage": "https://github.com/Shuai-S/dsh-sub2api-sync#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Shuai-S/sub2api-provider-sync.git",
+    "url": "git+https://github.com/Shuai-S/dsh-sub2api-sync.git",
     "directory": "packages/llm/sub2api-sync"
   },
-  "bugs": "https://github.com/Shuai-S/sub2api-provider-sync/issues",
+  "bugs": "https://github.com/Shuai-S/dsh-sub2api-sync/issues",
   "keywords": [
     "dsh",
     "dsh-plugin",

@@ -29,17 +29,17 @@ dsh plugin --profile web add dsh-sub2api-sync           # 别名（无 scope 短
 **GitHub Releases tarball**（不依赖 npm；地址始终指向最新版，两种变体内容等价）：
 
 ```sh
-dsh plugin --profile web add https://github.com/Shuai-S/sub2api-provider-sync/releases/latest/download/mangoc-dsh-sub2api-sync.tgz
+dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/mangoc-dsh-sub2api-sync.tgz
 # 或短名变体：
-dsh plugin --profile web add https://github.com/Shuai-S/sub2api-provider-sync/releases/latest/download/dsh-sub2api-sync.tgz
+dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/dsh-sub2api-sync.tgz
 ```
 
-也可以从 [Releases 页](https://github.com/Shuai-S/sub2api-provider-sync/releases) 复制带版本号的 tarball URL（形如 `mangoc-dsh-sub2api-sync-0.1.0.tgz` / `dsh-sub2api-sync-0.1.0.tgz`）以锁定版本。
+也可以从 [Releases 页](https://github.com/Shuai-S/dsh-sub2api-sync/releases) 复制带版本号的 tarball URL（形如 `mangoc-dsh-sub2api-sync-0.1.0.tgz` / `dsh-sub2api-sync-0.1.0.tgz`）以锁定版本。
 
 **从源码安装**（pnpm 会对 git 依赖自动执行 `prepare` 构建；需要本机构建链，首次较慢）：
 
 ```sh
-dsh plugin --profile web add github:Shuai-S/sub2api-provider-sync#path:packages/llm/sub2api-sync
+dsh plugin --profile web add github:Shuai-S/dsh-sub2api-sync#path:packages/llm/sub2api-sync
 ```
 
 装好后重启应用、或在插件页把开关关掉再打开，让入口重新 import 一次；失败的条目不会自动重试。
