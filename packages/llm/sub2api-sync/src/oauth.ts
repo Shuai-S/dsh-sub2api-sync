@@ -305,6 +305,13 @@ export class OAuthAttemptStore {
   constructor(private readonly ttlMs: number = OAUTH_ATTEMPT_TTL_MS) {}
 
   create(input: { verifier: string; redirectUri: string; scope: string }, now: number = Date.now()): OAuthAttempt {
+    // Lazy GC: a pending attempt abandoned by a closed tab or a lost redirect
+    // is never consumed by state, so without this sweep it would live in the
+    // registry forever (the host process is long-lived). Deleting during
+    // Map iteration is safe.
+    for (const [id, attempt] of this.attempts) {
+      if (this.expired(attempt, now)) this.drop(attempt)
+    }
     const attempt: OAuthAttempt = {
       id: randomBase64url(24),
       state: randomBase64url(32),

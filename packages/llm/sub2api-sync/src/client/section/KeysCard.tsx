@@ -4,8 +4,9 @@
  * first 5 and appends more with a 加载更多 button while `page < pages`.
  * The top-right 创建 key action opens a modal (sign-in-dialog pattern):
  * pick a group from all groups, name defaults to the group name, creation
- * binds the new key to that group (`groups.<id>.keyId`). Each listed row
- * binds/unbinds to its own group.
+ * checks the new key into `selectedKeys` (the sync selection is the config
+ * field, not a per-group pin). Each listed row's checkbox drives the same
+ * selection.
  *
  * @module sub2api-sync/client/section/KeysCard
  */

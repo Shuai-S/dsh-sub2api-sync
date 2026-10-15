@@ -46,7 +46,16 @@ export type ModelMetaIndex = Map<string, ModelMeta>
 
 const SNAPSHOT_PATH = join(dirname(fileURLToPath(import.meta.url)), '../data/models-dev.snapshot.json')
 const SOURCE_URL = 'https://models.dev/api.json'
+/** How long a successful catalog fetch is trusted. */
 const TTL = 24 * 60 * 60 * 1000
+/**
+ * How long a FAILED fetch defers the next attempt. Much shorter than the
+ * success TTL on purpose: a negative cache exists so an unreachable endpoint
+ * is not hammered per sync, but a models.dev outage (or a local network
+ * blip) should self-heal within the hour instead of freezing the catalog
+ * metadata for a full day.
+ */
+const NEGATIVE_TTL = 60 * 60 * 1000
 
 /**
  * pi-ai's `THINKING_LEVELS` vocabulary (dsh-llm-pi-ai: off/minimal/low/medium/
@@ -90,6 +99,8 @@ export const FIRST_PARTY_PROVIDERS: Set<string> = new Set([
 interface Cache {
   index: ModelMetaIndex
   at: number
+  /** Whether `index` came from a successful wire fetch (false = negative cache). */
+  ok: boolean
 }
 
 /**
@@ -335,13 +346,13 @@ export function bundledIndex(): ModelMetaIndex {
 /**
  * Resolve the index for one sync run. With `enrich` on, a fresh fetch is
  * attempted and cached for 24h (failures degrade to the bundled snapshot and
- * are cached for the same TTL so a dead endpoint is not retried per sync);
- * with `enrich` off, only the bundled snapshot is used — deterministic and
- * offline.
+ * are negative-cached for 1h so a dead endpoint is not retried per sync but
+ * an outage self-heals within the hour); with `enrich` off, only the bundled
+ * snapshot is used — deterministic and offline.
  */
 export async function loadModelIndex(options: { enrich: boolean; fetchImpl?: typeof fetch; now?: () => number }): Promise<ModelMetaIndex> {
   const now = (options.now ?? Date.now)()
-  if (networkCache !== undefined && now - networkCache.at < TTL) return networkCache.index
+  if (networkCache !== undefined && now - networkCache.at < (networkCache.ok ? TTL : NEGATIVE_TTL)) return networkCache.index
   if (options.enrich) {
     try {
       const doFetch = options.fetchImpl ?? globalThis.fetch
@@ -350,14 +361,14 @@ export async function loadModelIndex(options: { enrich: boolean; fetchImpl?: typ
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const catalog: unknown = await response.json()
       const index = parseCatalog(catalog)
-      networkCache = { index, at: now }
+      networkCache = { index, at: now, ok: true }
       return index
     } catch {
-      // Fall through to the bundled snapshot; cached below for the TTL.
+      // Fall through to the bundled snapshot; negative-cached below.
     }
   }
   const bundled = bundledIndex()
-  if (options.enrich) networkCache = { index: bundled, at: now }
+  if (options.enrich) networkCache = { index: bundled, at: now, ok: false }
   return bundled
 }
 

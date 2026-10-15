@@ -257,6 +257,26 @@ describe('loadModelIndex', () => {
     expect(index.get('claude-haiku-4-5')).toMatchObject({ contextWindow: 200000 })
     resetCaches()
   })
+
+  it('negative-caches a failed fetch for 1h, not a full day', async () => {
+    resetCaches()
+    let fetchCalls = 0
+    const fetchImpl = (async () => {
+      fetchCalls++
+      return { ok: false, status: 503, json: async () => undefined } as Response
+    }) as typeof fetch
+    const t0 = 5000
+    const failed = await loadModelIndex({ enrich: true, fetchImpl, now: () => t0 })
+    expect(fetchCalls).toBe(1)
+    expect(failed.get('claude-haiku-4-5')).toMatchObject({ contextWindow: 200000 })
+    // Within the negative TTL the bundled snapshot answers without a wire call.
+    await loadModelIndex({ enrich: true, fetchImpl, now: () => t0 + 30 * 60 * 1000 })
+    expect(fetchCalls).toBe(1)
+    // Past it the endpoint is retried (and still failing here).
+    await loadModelIndex({ enrich: true, fetchImpl, now: () => t0 + 61 * 60 * 1000 })
+    expect(fetchCalls).toBe(2)
+    resetCaches()
+  })
 })
 
 describe('bundledIndex', () => {

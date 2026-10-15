@@ -22,6 +22,7 @@ import type { NS } from '../locales.ts'
 import { refreshStatus } from '../status.ts'
 import { dropSelectedKey, pruneInvalidSelection, setField, useConfigForm } from '../useConfigForm.ts'
 import type { PluginApi } from '../usePluginApi.ts'
+import { PKG_NAME } from '../constants.ts'
 import { SignInDialog } from './SignInDialog.tsx'
 import { KeysCard } from './KeysCard.tsx'
 import { accountLabelOf, formatBalance } from './header.ts'
@@ -125,7 +126,12 @@ export function Sub2apiSyncSection({ t, api, config, useStatus }: Sub2apiSyncSec
   const instanceMarker = (configValues?.baseURL ?? '').trim().replace(/\/+$/, '').toLowerCase()
   const previousInstance = useRef<string | undefined>(undefined)
   useEffect(() => {
-    const markerKey = 'sub2api-sync:last-instance'
+    // Namespaced by the package name: the plugin ships under TWO npm names
+    // (canonical + alias) and localStorage is origin-scoped across every
+    // profile — an un-namespaced key would let the variants' sessions
+    // overwrite each other's marker and fire spurious "instance switched"
+    // purges.
+    const markerKey = `${PKG_NAME}:last-instance`
     let stored: string | undefined
     try {
       stored = window.localStorage.getItem(markerKey) ?? undefined
