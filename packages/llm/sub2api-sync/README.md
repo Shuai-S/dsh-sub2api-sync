@@ -25,18 +25,12 @@ dsh plugin --profile web add @mangoc/dsh-sub2api-sync   # canonical (scoped)
 dsh plugin --profile web add dsh-sub2api-sync           # alias (unscoped short name)
 ```
 
-**GitHub Releases tarball** (no npm involved; the URLs always point to the
-latest release; both variants are equivalent):
+**GitHub Releases tarball** (no npm involved; the URL always points to the
+latest release):
 
 ```sh
-dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/mangoc-dsh-sub2api-sync.tgz
-# or the short-name variant:
 dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/dsh-sub2api-sync.tgz
 ```
-
-You can also copy a version-pinned tarball URL (e.g.
-`mangoc-dsh-sub2api-sync-0.1.0.tgz` / `dsh-sub2api-sync-0.1.0.tgz`) from the
-[Releases page](https://github.com/Shuai-S/dsh-sub2api-sync/releases).
 
 **From source** (pnpm runs the `prepare` build on git dependencies; needs a
 local toolchain and is slower on first install):
@@ -59,7 +53,7 @@ CI ([.github/workflows/release.yml](../../../.github/workflows/release.yml))
 runs the whole flow: bump `version` in
 `packages/llm/sub2api-sync/package.json` → commit →
 `git tag vX.Y.Z && git push origin vX.Y.Z` → `pnpm check` → two tarballs →
-GitHub Release (4 assets: 2 versioned + 2 stable-name copies) → npm dual
+GitHub Release (1 stable-name tarball asset) → npm dual
 publish (requires the repo secret `NPM_TOKEN`; `publishConfig.registry` is
 pinned to the official npmjs registry, immune to mirror configs). Manual dual
 publish from a local checkout:

@@ -55,10 +55,9 @@ jobs:
       - name: Pack both published names
         run: |
           cd packages/llm/sub2api-sync
+          # Both tarballs are built (npm publishes both names); only the
+          # short-name variant is attached to the GitHub Release.
           node scripts/pack-all.mjs --out "$GITHUB_WORKSPACE/dist"
-          # Stable-name copies so "releases/latest/download/<name>" URLs work.
-          cp "$GITHUB_WORKSPACE"/dist/mangoc-dsh-sub2api-sync-*.tgz \
-             "$GITHUB_WORKSPACE/dist/mangoc-dsh-sub2api-sync.tgz"
           cp "$GITHUB_WORKSPACE"/dist/dsh-sub2api-sync-*.tgz \
              "$GITHUB_WORKSPACE/dist/dsh-sub2api-sync.tgz"
 
@@ -70,7 +69,7 @@ jobs:
             || gh release create "$GITHUB_REF_NAME" \
                  --title "$GITHUB_REF_NAME" \
                  --generate-notes
-          gh release upload "$GITHUB_REF_NAME" dist/*.tgz --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/dsh-sub2api-sync.tgz --clobber
 
       - name: Publish to npm (scoped canonical + unscoped alias)
         env:

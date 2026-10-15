@@ -32,15 +32,11 @@ dsh plugin --profile web add @mangoc/dsh-sub2api-sync
 dsh plugin --profile web add dsh-sub2api-sync
 ```
 
-**GitHub Releases** — stable-name tarballs that always point to the latest release:
+**GitHub Releases** — a stable-name tarball that always points to the latest release:
 
 ```sh
-dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/mangoc-dsh-sub2api-sync.tgz
-# or the short-name variant
 dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/dsh-sub2api-sync.tgz
 ```
-
-Version-pinned tarballs (e.g. `mangoc-dsh-sub2api-sync-0.1.0.tgz`) are on the [Releases page](https://github.com/Shuai-S/dsh-sub2api-sync/releases).
 
 **From source** — pnpm runs the `prepare` build on git dependencies (needs a local toolchain):
 
@@ -83,7 +79,7 @@ dsh plugin --profile web add ./packages/llm/sub2api-sync
 
 1. Bump `version` in `packages/llm/sub2api-sync/package.json`.
 2. Commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. CI runs checks, packs **both published names** (scoped canonical + unscoped alias — the plugin identity is injected per variant), creates the GitHub Release with 4 tarball assets, and publishes to npm.
+3. CI runs checks, packs **both published names** (scoped canonical + unscoped alias — the plugin identity is injected per variant), attaches the stable-name tarball to the GitHub Release, and publishes to npm.
 
 > The first publish of a brand-new package name parks in npm's **Staged Packages** queue — confirm it once on npmjs.com; later releases go straight through.
 

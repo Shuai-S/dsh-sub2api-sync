@@ -35,12 +35,8 @@ dsh plugin --profile web add dsh-sub2api-sync
 **GitHub Releases**——固定名 tarball，始终指向最新版：
 
 ```sh
-dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/mangoc-dsh-sub2api-sync.tgz
-# 或短名变体
 dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/dsh-sub2api-sync.tgz
 ```
-
-带版本号的 tarball（如 `mangoc-dsh-sub2api-sync-0.1.0.tgz`）见 [Releases 页](https://github.com/Shuai-S/dsh-sub2api-sync/releases)。
 
 **从源码**——pnpm 会对 git 依赖自动执行 `prepare` 构建（需要本机构建链）：
 
@@ -83,7 +79,7 @@ dsh plugin --profile web add ./packages/llm/sub2api-sync
 
 1. 改 `packages/llm/sub2api-sync/package.json` 的 `version`；
 2. 提交后 `git tag vX.Y.Z && git push origin vX.Y.Z`；
-3. CI 自动跑检查、按**两个包名**分别打包（scoped canonical + 无 scope 别名，插件身份按变体注入）、创建带 4 个 tarball 资产的 GitHub Release、双发布 npm。
+3. CI 自动跑检查、按**两个包名**分别打包（scoped canonical + 无 scope 别名，插件身份按变体注入）、在 GitHub Release 附上短名 tarball、双发布 npm。
 
 > 全新包名的首次发布会在 npm **Staged Packages** 队列停留，去 npmjs.com 确认一次即可；之后的版本直接通过。
 

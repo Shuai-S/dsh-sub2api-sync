@@ -26,15 +26,11 @@ dsh plugin --profile web add @mangoc/dsh-sub2api-sync   # canonical（scoped）
 dsh plugin --profile web add dsh-sub2api-sync           # 别名（无 scope 短名）
 ```
 
-**GitHub Releases tarball**（不依赖 npm；地址始终指向最新版，两种变体内容等价）：
+**GitHub Releases tarball**（不依赖 npm；地址始终指向最新版）：
 
 ```sh
-dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/mangoc-dsh-sub2api-sync.tgz
-# 或短名变体：
 dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/releases/latest/download/dsh-sub2api-sync.tgz
 ```
-
-也可以从 [Releases 页](https://github.com/Shuai-S/dsh-sub2api-sync/releases) 复制带版本号的 tarball URL（形如 `mangoc-dsh-sub2api-sync-0.1.0.tgz` / `dsh-sub2api-sync-0.1.0.tgz`）以锁定版本。
 
 **从源码安装**（pnpm 会对 git 依赖自动执行 `prepare` 构建；需要本机构建链，首次较慢）：
 
@@ -46,7 +42,7 @@ dsh plugin --profile web add github:Shuai-S/dsh-sub2api-sync#path:packages/llm/s
 
 ### 发布（维护者）
 
-每次发版**双包同步发布**（[scripts/pack-all.mjs](scripts/pack-all.mjs)）：scoped canonical 与无 scope 别名各出一个 tarball，版本号完全一致；客户端 bundle 内嵌的插件名（挂载 key、详情页匹配、ModuleLoader id）与 `cordis.patch.yml` 在打包时按包名注入，两个变体都可独立安装。CI（[.github/workflows/release.yml](../../../.github/workflows/release.yml)）自动完成全流程：bump `packages/llm/sub2api-sync/package.json` 的 `version` → 提交 → `git tag vX.Y.Z && git push origin vX.Y.Z` → `pnpm check` → 双 tarball → GitHub Release（4 个资产：2 个版本号 tarball + 2 个固定名副本）→ npm 双发布（需要仓库 secret `NPM_TOKEN`；`publishConfig.registry` 已锁定 npmjs 官方源，不受 npmmirror 镜像影响）。本地手动双发布：
+每次发版**双包同步发布**（[scripts/pack-all.mjs](scripts/pack-all.mjs)）：scoped canonical 与无 scope 别名各出一个 tarball，版本号完全一致；客户端 bundle 内嵌的插件名（挂载 key、详情页匹配、ModuleLoader id）与 `cordis.patch.yml` 在打包时按包名注入，两个变体都可独立安装。CI（[.github/workflows/release.yml](../../../.github/workflows/release.yml)）自动完成全流程：bump `packages/llm/sub2api-sync/package.json` 的 `version` → 提交 → `git tag vX.Y.Z && git push origin vX.Y.Z` → `pnpm check` → 双 tarball → npm 双发布（需要仓库 secret `NPM_TOKEN`；`publishConfig.registry` 已锁定 npmjs 官方源，不受 npmmirror 镜像影响）；GitHub Release 附短名 tarball 资产。本地手动双发布：
 
 ```sh
 pnpm pack:all    # 产出 dist/ 下两个 tarball，仓库文件自动还原
