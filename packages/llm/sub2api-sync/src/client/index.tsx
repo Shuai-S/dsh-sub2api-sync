@@ -10,7 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { mount } from './mount.ts'
 
 export const name = 'dsh-sub2api-sync-client'
-export const inject = ['slots', 'locale', 'configForms']
+export const inject = ['slots', 'locale', 'configForms', 'pluginNavigation']
 
 /** Plugin body: register locale dictionaries and both slot seats. */
 export function apply(ctx: Context): void {

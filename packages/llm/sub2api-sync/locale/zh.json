@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Sub2API 同步",
-    "description": "把一个 sub2api 实例的分组、key 与模型同步为 dsh-llm-pi-ai 供应商路由：先连接面板（PAT / 密码 / OAuth），一个分组一个供应商。"
+    "description": "把一个 sub2api 实例的分组、key 与模型同步为 dsh-llm-pi-ai 供应商路由：面板登录（密码 / OAuth），一把 key 一个供应商。"
   }
 }

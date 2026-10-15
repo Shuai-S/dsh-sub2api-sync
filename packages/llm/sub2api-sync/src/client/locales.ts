@@ -112,8 +112,8 @@ const zh = {
   detailSectionEmpty: '还没有同步过——在设置 → Sub2API 同步 完成首次同步',
   activationTitle: '开始使用 Sub2API 同步',
   activationStep1: '1. 在设置中连接面板（账号密码或网页授权）',
-  activationStep2: '2. 勾选要同步的分组（key 自动准备）',
-  activationStep3: '3. 点击「立即同步」，模型即可使用',
+  activationStep2: '2. 在 Keys 卡勾选要同步的 key（可跨分组）',
+  activationStep3: '3. 点击「同步所选」，模型即可使用',
   activationOpenConfig: '打开配置页',
   activationDismiss: '知道了',
 
@@ -235,8 +235,8 @@ const en = {
   detailSectionEmpty: 'Never synced — finish the first sync in Settings → Sub2API Sync',
   activationTitle: 'Get started with Sub2API Sync',
   activationStep1: '1. Connect the panel in Settings (account password or web authorization)',
-  activationStep2: '2. Check the groups to sync (keys are prepared automatically)',
-  activationStep3: '3. Click "Sync now" and the models are ready',
+  activationStep2: '2. Tick the keys to sync on the Keys card (cross-group)',
+  activationStep3: '3. Click "Sync selected" and the models are ready',
   activationOpenConfig: 'Open configuration',
   activationDismiss: 'Got it',
 

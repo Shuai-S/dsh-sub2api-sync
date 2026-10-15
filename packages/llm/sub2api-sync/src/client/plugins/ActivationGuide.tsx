@@ -13,11 +13,16 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import { NS } from '../locales.ts'
 
 export type ActivationGuideProps =
-  PropsRuntime<'plugins.bundle.activation'> & PropsLocale<typeof NS>
+  PropsRuntime<'plugins.bundle.activation'> &
+  PropsLocale<typeof NS> & {
+    /** Host navigation service bridge (`mount.ts`): opens this bundle's
+     *  detail page; `undefined`/`false` → fall back to `onOpenDetails`. */
+    openBundleDetails?: () => boolean
+  }
 
 /** @param props - the activation subject plus the page's dismiss/navigate commands. */
 export function ActivationGuide(props: ActivationGuideProps): ReactNode {
-  const { t, onDismiss, onOpenDetails } = props
+  const { t, onDismiss, onOpenDetails, openBundleDetails } = props
   return (
     <div className="s2s-card">
       <span className="s2s-name">{t('activationTitle')}</span>
@@ -27,7 +32,14 @@ export function ActivationGuide(props: ActivationGuideProps): ReactNode {
         <li>{t('activationStep3')}</li>
       </ol>
       <div className="s2s-actions">
-        <Button variant="primary" onClick={onOpenDetails}>{t('activationOpenConfig')}</Button>
+        <Button
+          variant="primary"
+          onClick={() => {
+            if (!(openBundleDetails?.() ?? false)) onOpenDetails()
+          }}
+        >
+          {t('activationOpenConfig')}
+        </Button>
         <Button variant="ghost" onClick={onDismiss}>{t('activationDismiss')}</Button>
       </div>
     </div>

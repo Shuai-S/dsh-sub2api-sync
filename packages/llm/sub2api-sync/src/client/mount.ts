@@ -83,9 +83,22 @@ export function mount(ctx: Context): void {
     locale: NS,
   }, DetailSection))
 
+  const activationOps = {
+    /** Jump to this bundle's detail page via the host navigation service;
+     *  returns `false` when the service is unavailable so the caller falls
+     *  back to the page-injected `onOpenDetails`. */
+    openBundleDetails: (): boolean => {
+      const nav = ctx.pluginNavigation as { openBundle(packageName: string): void } | undefined
+      if (nav === undefined) return false
+      nav.openBundle(PKG_NAME)
+      return true
+    },
+  }
+
   ctx.slots.inject('plugins.bundle.activation', () => ctx.slots.register({
     name: 'plugins.bundle.activation',
     key: PKG_NAME,
     locale: NS,
+    inject: () => activationOps,
   }, ActivationGuide))
 }

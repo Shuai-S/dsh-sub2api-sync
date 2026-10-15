@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Sub2API Sync",
-    "description": "Sync one sub2api instance's groups, keys, and models into dsh-llm-pi-ai provider routes: panel-driven login (PAT / password / OAuth) first, one group one provider."
+    "description": "Sync one sub2api instance's groups, keys, and models into dsh-llm-pi-ai provider routes: panel-driven login (password / OAuth), one relay key one provider."
   }
 }
