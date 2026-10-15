@@ -66,8 +66,8 @@ function depsStub(overrides: Partial<RouteDeps> = {}): RouteDeps {
     login2FA: async () => undefined,
     logout: async () => undefined,
     listGroups: async () => [
-      { id: 2, name: 'codex-稳定[号池]', platform: 'openai', status: 'active', rateMultiplier: 0.2, enabled: true },
-      { id: 4, name: 'claude-max[号池]', platform: 'anthropic', status: 'active', rateMultiplier: 1.5, enabled: false },
+      { id: 2, name: 'codex-稳定[号池]', platform: 'openai', status: 'active', rateMultiplier: 0.2 },
+      { id: 4, name: 'claude-max[号池]', platform: 'anthropic', status: 'active', rateMultiplier: 1.5 },
     ],
     sync: async () => ({ entries: [{ groupId: 2, route: 'sub2api-2', displayName: 'NexaRelay(key)', action: 'created', models: 3 }], removed: [], writes: 1, attempts: 1, warnings: [] }),
     lastReport: () => undefined,
@@ -179,13 +179,13 @@ describe('routes', () => {
     expect(ok.body).toEqual({ ok: true, kind: 'ok' })
   })
 
-  it('annotates groups with the checked and keyId state', async () => {
+  it('projects the panel groups verbatim (checked state rides the config, not this response)', async () => {
     const { ctx, handlers } = fakeCtx()
     registerRoutes(ctx, depsStub())
     const { body } = await call(handlers, ROUTES.groups)
     expect(body?.groups).toEqual([
-      expect.objectContaining({ id: 2, enabled: true }),
-      expect.objectContaining({ id: 4, enabled: false }),
+      expect.objectContaining({ id: 2, name: 'codex-稳定[号池]', platform: 'openai' }),
+      expect.objectContaining({ id: 4, name: 'claude-max[号池]', platform: 'anthropic' }),
     ])
   })
 

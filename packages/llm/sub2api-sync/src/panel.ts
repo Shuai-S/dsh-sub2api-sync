@@ -243,13 +243,7 @@ export class PanelClient {
 
   /** Password login; classifies 2FA and captcha outcomes. */
   async login(email: string, password: string): Promise<LoginOutcome> {
-    let payload: unknown
-    try {
-      payload = await this.call(undefined, 'POST', '/auth/login', { email, password })
-    } catch (error) {
-      if (error instanceof PanelError) throw error
-      throw error
-    }
+    const payload = await this.call(undefined, 'POST', '/auth/login', { email, password })
     const data = payload as Record<string, unknown> | null | undefined
     if (data !== null && typeof data === 'object' && data.requires_2fa === true) {
       const tempToken = data.temp_token

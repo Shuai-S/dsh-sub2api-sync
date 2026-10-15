@@ -262,3 +262,48 @@ export interface CredentialsLike {
   set(ref: string, value: string): Promise<void>
   unset(ref: string): Promise<void>
 }
+
+/**
+ * The settings service's concurrent-writer error shape (`code` or `name`).
+ * One predicate for every conflict surface: the shared mutate helper below,
+ * the engine's plan loop, and the route layer's 409 projection.
+ */
+export function isSettingsConflict(error: unknown): boolean {
+  const shape = error as { code?: unknown; name?: unknown } | null | undefined
+  return shape?.code === 'SETTINGS_CONFLICT' || shape?.name === 'SettingsConflictError'
+}
+
+/**
+ * Conflict-retried write into one settings namespace: build the ops, read
+ * the namespace's live revision, mutate, and on a concurrent-writer conflict
+ * rebuild + retry (bounded — 3 attempts total, matching the engine's policy).
+ *
+ * `buildOps` runs per attempt so a retry can recompute the plan against the
+ * just-re-read state; it may close over outer holders to surface the final
+ * ops/actions (the engine does exactly that for its sync report). An empty
+ * ops list skips the wire round trip entirely — but the namespace must still
+ * exist (the same loud failure the engine's revision read used to produce).
+ */
+export async function mutateWithRetry(
+  settings: SettingsLike,
+  ns: string,
+  buildOps: () => SettingsPathOp[] | Promise<SettingsPathOp[]>,
+  options: { missingError?: string; attempts?: number } = {},
+): Promise<void> {
+  const maxAttempts = options.attempts ?? 3
+  for (let attempt = 1; ; attempt++) {
+    const ops = await buildOps()
+    const descriptor = settings.describe().find((candidate) => candidate.ns === ns)
+    if (descriptor === undefined) {
+      throw new Error(options.missingError ?? `sub2api-sync: 设置命名空间 "${ns}" 未注册`)
+    }
+    if (ops.length === 0) return
+    try {
+      await settings.mutate(ns, ops, descriptor.revision)
+      return
+    } catch (error) {
+      if (attempt < maxAttempts && isSettingsConflict(error)) continue
+      throw error
+    }
+  }
+}

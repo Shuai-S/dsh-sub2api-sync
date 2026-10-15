@@ -45,7 +45,7 @@ import {
   type RouteDeps,
   type StatusRoute,
 } from './routes.ts'
-import { routeKeyRef, routeForKey, panelTokenRef, panelRefreshRef, oauthTokenRef, oauthRefreshRef, isOwnedRoute } from './types.ts'
+import { routeKeyRef, routeForKey, panelTokenRef, panelRefreshRef, oauthTokenRef, oauthRefreshRef, isOwnedRoute, mutateWithRetry } from './types.ts'
 import type { SettingsPathOp } from './types.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -122,23 +122,10 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
 
   /** Conflict-retried write into the llm-pi-ai section (purge path mirrors
    * the engine's conflict policy without touching its queue). */
-  const mutatePiAi = async (ops: SettingsPathOp[]): Promise<void> => {
-    let attempts = 0
-    for (;;) {
-      attempts++
-      const revision = ctx.settings.describe().find((descriptor) => descriptor.ns === PI_AI_NS)?.revision
-      if (revision === undefined) throw new Error('sub2api-sync: llm-pi-ai 设置条目未注册')
-      try {
-        await ctx.settings.mutate(PI_AI_NS, ops, revision)
-        return
-      } catch (error) {
-        const shape = error as { code?: unknown; name?: unknown } | null | undefined
-        const conflict = shape?.code === 'SETTINGS_CONFLICT' || shape?.name === 'SettingsConflictError'
-        if (conflict && attempts < 3) continue
-        throw error
-      }
-    }
-  }
+  const mutatePiAi = (ops: SettingsPathOp[]): Promise<void> =>
+    mutateWithRetry(ctx.settings, PI_AI_NS, () => ops, {
+      missingError: 'sub2api-sync: llm-pi-ai 设置条目未注册',
+    })
 
   const credentials = {
     resolve: (ref: string) => ctx.credentials.resolve(credentialRef(ref)),
@@ -183,27 +170,17 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
   const gateway = new PanelGateway({ baseURL: () => source().baseURL?.trim() ?? '', credentials, onAuthLost: () => void purgeSyncState().catch(() => undefined) })
   const engine = new Sub2apiSyncEngine({ settings: ctx.settings, credentials, gateway, siteName: () => instanceProbe.siteName(instance()) })
 
-  const ownRevision = (): number | undefined =>
-    ctx.settings.describe().find((descriptor) => descriptor.ns === OWN_NS)?.revision
+  // The first login leg's typed password, held across the 2FA leg. The panel
+  // only proves it correct once the FULL login completes, so persistence is
+  // deferred until then — storing it up front would save a wrong guess and
+  // poison every later password-less login with it.
+  let pendingTypedPassword: string | undefined
 
   /** Conflict-retried write into this plugin's own section (best effort). */
-  const mutateOwn = async (ops: SettingsPathOp[]): Promise<void> => {
-    let attempts = 0
-    for (;;) {
-      attempts++
-      const revision = ownRevision()
-      if (revision === undefined) throw new Error('sub2api-sync: 自身 settings 命名空间未注册')
-      try {
-        await ctx.settings.mutate(OWN_NS, ops, revision)
-        return
-      } catch (error) {
-        const shape = error as { code?: unknown; name?: unknown } | null | undefined
-        const conflict = shape?.code === 'SETTINGS_CONFLICT' || shape?.name === 'SettingsConflictError'
-        if (conflict && attempts < 3) continue
-        throw error
-      }
-    }
-  }
+  const mutateOwn = (ops: SettingsPathOp[]): Promise<void> =>
+    mutateWithRetry(ctx.settings, OWN_NS, () => ops, {
+      missingError: 'sub2api-sync: 自身 settings 命名空间未注册',
+    })
 
   const instance = (): string => source().baseURL?.trim() ?? ''
 
@@ -218,22 +195,37 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
     instance,
     authState: () => gateway.authState(source().email),
     login: async (email, password): Promise<LoginResponse> => {
-      let pwd = password
-      if (pwd === undefined || pwd.length === 0) {
-        pwd = (await credentials.resolve(panelPasswordRef(instance())))?.value
-      }
+      const typed = password !== undefined && password.length > 0 ? password : undefined
+      let pwd = typed ?? (await credentials.resolve(panelPasswordRef(instance())))?.value
       if (pwd === undefined || pwd.length === 0) {
         throw new Error('请输入面板密码（首次登录后密码会保存到凭据存储，之后可免输入）')
       }
-      if (password !== undefined && password.length > 0) {
-        await credentials.set(panelPasswordRef(instance()), password)
-      }
       await mutateOwn([{ op: 'set', path: ['email'], value: email }]).catch(() => undefined)
       const outcome = await gateway.login(email, pwd)
-      if (outcome.kind === '2fa') return { ok: true, kind: '2fa', requires2FA: true }
+      if (outcome.kind === '2fa') {
+        // First leg accepted the pair provisionally; the password persists
+        // only after the second leg completes (see login2FA below).
+        pendingTypedPassword = typed
+        return { ok: true, kind: '2fa', requires2FA: true }
+      }
+      // 'ok' (and the defensive 'captcha' shape — the client throws instead):
+      // the panel answered. Only now may the typed password land in the
+      // credential store, so a failed attempt never leaves a wrong value behind.
+      if (outcome.kind === 'ok' && typed !== undefined) {
+        await credentials.set(panelPasswordRef(instance()), typed).catch(() => undefined)
+      }
+      pendingTypedPassword = undefined
       return { ok: true, kind: 'ok' }
     },
-    login2FA: (code) => gateway.login2FA(code),
+    login2FA: async (code) => {
+      await gateway.login2FA(code)
+      // The two-leg login just completed: the first leg's typed password is
+      // proven correct — persist it for the later password-less logins.
+      if (pendingTypedPassword !== undefined) {
+        await credentials.set(panelPasswordRef(instance()), pendingTypedPassword).catch(() => undefined)
+        pendingTypedPassword = undefined
+      }
+    },
     logout: async () => {
       await gateway.logout()
       // Logout policy: the site's sync state (provider routes + relay key
@@ -250,7 +242,6 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
         rateMultiplier: group.rateMultiplier,
         isExclusive: group.isExclusive,
         claudeCodeOnly: group.claudeCodeOnly,
-        enabled: false,
       }))
     },
     sync: async (keyIds?: number[]) => {

@@ -27,7 +27,7 @@ import type { SyncReport } from './engine.ts'
 import type { IconPayload } from './icon.ts'
 import type { AuthKind } from './panel.ts'
 import type { CallbackLang } from './oauth.ts'
-import { isOwnedRoute } from './types.ts'
+import { isOwnedRoute, isSettingsConflict } from './types.ts'
 
 /** The hand-back page's locale from the callback request's Accept-Language:
  * the first tag decides (`en*` → en, anything else → zh — matching the
@@ -123,10 +123,6 @@ export interface GroupsView {
   rateMultiplier?: number
   isExclusive?: boolean
   claudeCodeOnly?: boolean
-  /** Whether the group is checked for sync (`enabledGroups`). */
-  enabled: boolean
-  /** The stored key source (`groups[gid].keyId`), when one is pinned. */
-  keyId?: number
 }
 
 export interface GroupsResponse {
@@ -241,9 +237,20 @@ function isPrivateAddress(address: string): boolean {
   return lowered.startsWith('fc') || lowered.startsWith('fd')
 }
 
+/** Request bodies here are tiny JSON documents; a larger stream is a broken
+ * or hostile peer — refuse it before buffering (same posture as icon.ts's
+ * MAX_BYTES). */
+const MAX_BODY_BYTES = 1_000_000
+
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []
-  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  let total = 0
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    total += buffer.length
+    if (total > MAX_BODY_BYTES) throw new Error(`request body 超过 ${MAX_BODY_BYTES} 字节上限`)
+    chunks.push(buffer)
+  }
   const text = Buffer.concat(chunks).toString('utf8').trim()
   if (text.length === 0) return {}
   const value: unknown = JSON.parse(text)
@@ -284,8 +291,7 @@ function safeMessage(error: unknown): string {
 }
 
 function conflictStatus(error: unknown): number | undefined {
-  const shape = error as { code?: unknown; name?: unknown } | null | undefined
-  return shape?.code === 'SETTINGS_CONFLICT' || shape?.name === 'SettingsConflictError' ? 409 : undefined
+  return isSettingsConflict(error) ? 409 : undefined
 }
 
 export interface RouteDeps {
@@ -299,12 +305,9 @@ export interface RouteDeps {
   login2FA(code: string): Promise<void>
   /** Drop panel tokens. */
   logout(): Promise<void>
-  /** Live panel groups annotated with the card's checked/keyId state. */
+  /** Live panel groups as the panel reports them (the card's checked state
+   * rides the config's `selectedKeys`, not this response). */
   listGroups(): Promise<GroupsView[]>
-  /** One group's relay keys, metadata only (no plaintext). */
-  /** Store or clear one group's pasted relay key (empty/absent clears). */
-  /** Model preview for one group: pasted override wins over the stored key. */
-  /** Best-effort subscription group-name probe for one group's key. */
   /** Run one sync; the implementation serializes and records the report. */
   sync(keyIds?: number[]): Promise<SyncReport>
   lastReport(): SyncReport | undefined

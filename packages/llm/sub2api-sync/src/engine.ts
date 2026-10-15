@@ -35,6 +35,7 @@ import {
   isOwnedRoute,
   legacyKeyIdOfRoute,
   legacyKeyRef,
+  mutateWithRetry,
   routeForKey,
   routeKeyRef,
   type ApiProtocol,
@@ -124,11 +125,6 @@ export class Sub2apiSyncError extends Error {
   }
 }
 
-function isSettingsConflict(error: unknown): boolean {
-  const shape = error as { code?: unknown; name?: unknown } | null | undefined
-  return shape?.code === 'SETTINGS_CONFLICT' || shape?.name === 'SettingsConflictError'
-}
-
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -200,8 +196,8 @@ export class Sub2apiSyncEngine {
 
   /**
    * Run one sync. At most one runs at a time — later callers queue behind
-   * the previous one (the settings-card button, the tool, and the timer all
-   * share this queue).
+   * the previous one (the settings-card button and the timer share this
+   * queue).
    */
   sync(config: Sub2apiSyncConfig, keyIds?: number[]): Promise<SyncReport> {
     const run = this.queue.then(
@@ -232,12 +228,17 @@ export class Sub2apiSyncEngine {
 
     // The panel gates everything: not signed in fails loud here. One pass
     // gathers the group platform map and every key row (bounded page walk).
+    let keyWalkTruncated = false
     const { groups, keyRows } = await this.gateway.use(async (panel, token) => {
       const groupList = await panel.listAvailableGroups(token)
       const rows: PanelKey[] = []
       for (let page = 1; page <= 10; page++) {
         const result = await panel.listKeys(token, { page, pageSize: 100 })
         rows.push(...result.items)
+        // A panel reporting more pages than the walk visits means the sync
+        // only saw a prefix of the key list — surfaced as a report warning
+        // below instead of silently dropping the tail keys.
+        if (result.pages > 10) keyWalkTruncated = true
         if (page >= result.pages || result.items.length === 0) break
       }
       return { groups: groupList, keyRows: rows }
@@ -253,6 +254,9 @@ export class Sub2apiSyncEngine {
     const site = await this.siteName?.().catch(() => undefined)
 
     const syncWarnings: string[] = []
+    if (keyWalkTruncated) {
+      syncWarnings.push('面板 key 数量超过单次同步的读取上限（10 页 × 100 = 1000 把）——超出部分未参与同步，也不会被移除')
+    }
     const effective = { ...config, selectedKeys: selection ?? config.selectedKeys }
     for (const target of resolveTargets(effective, keyRows)) {
       if ('invalid' in target) {
@@ -283,13 +287,14 @@ export class Sub2apiSyncEngine {
     }
 
     // The diff/retry loop: every conflict re-reads the current section and
-    // recomputes the ops against it; `desired` is conflict-independent.
+    // recomputes the ops against it; `desired` is conflict-independent. The
+    // plan rebuild rides the shared mutate helper's per-attempt `buildOps`.
     let attempts = 0
     const removed: string[] = []
     let ops: SettingsPathOp[] = []
     let routeActions = new Map<string, SyncAction>()
 
-    for (;;) {
+    await mutateWithRetry(this.settings, PI_AI_NS, () => {
       attempts++
       const now = this.readCurrentProviders()
       const plan = planOps(now, desired)
@@ -299,15 +304,8 @@ export class Sub2apiSyncEngine {
       for (const op of ops) {
         if (op.op === 'unset') removed.push(op.path[1])
       }
-      const revision = this.revisionOf(PI_AI_NS)
-      try {
-        if (ops.length > 0) await this.settings.mutate(PI_AI_NS, ops, revision)
-        break
-      } catch (error) {
-        if (isSettingsConflict(error) && attempts < 3) continue
-        throw error
-      }
-    }
+      return ops
+    })
 
     for (const entry of entries) {
       const action = routeActions.get(entry.route)
@@ -352,7 +350,9 @@ export class Sub2apiSyncEngine {
         mapOps.push({ op: 'unset', path: ['routeKeyIds', route] })
       }
       if (mapOps.length > 0) {
-        await this.settings.mutate(OWN_NS, mapOps, this.revisionOf(OWN_NS))
+        await mutateWithRetry(this.settings, OWN_NS, () => mapOps, {
+          missingError: 'sub2api-sync: 自身 settings 命名空间未注册',
+        })
       }
     } catch {
       // Non-fatal: the next successful sync rewrites the map.
@@ -502,6 +502,9 @@ export class Sub2apiSyncEngine {
         models: enriched,
         apiKeyEnv: ref,
         template,
+        retryPolicy: config.retryPolicy,
+        defaultContextWindow: config.defaultContextWindow,
+        defaultMaxTokens: config.defaultMaxTokens,
       }),
       warnings,
     }
@@ -545,14 +548,6 @@ export class Sub2apiSyncEngine {
       throw new Sub2apiSyncError('llm-pi-ai.providers 形状异常（不是对象）')
     }
     return providers as Record<string, PiAiProviderProfile>
-  }
-
-  private revisionOf(ns: string): number {
-    const descriptor = this.settings.describe().find((candidate) => candidate.ns === ns)
-    if (descriptor === undefined) {
-      throw new Sub2apiSyncError(`设置命名空间 "${ns}" 未注册，无法取得 revision`)
-    }
-    return descriptor.revision
   }
 }
 
