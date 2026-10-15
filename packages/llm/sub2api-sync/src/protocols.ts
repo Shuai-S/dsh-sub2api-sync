@@ -173,6 +173,12 @@ export interface ProfileInput {
   models: readonly ProfileModelInput[]
   apiKeyEnv: string
   template?: ModelTemplate
+  /** Overrides over {@link SUB2API_RETRY_POLICY}; absent keys inherit it. */
+  retryPolicy?: Partial<PiAiRetryPolicy>
+  /** Route-level defaults for models the enrichment could not match
+   * (Config `defaultContextWindow`/`defaultMaxTokens`). */
+  defaultContextWindow?: number
+  defaultMaxTokens?: number
 }
 
 /** Build one hand-declared llm-pi-ai provider profile for a group. */
@@ -182,6 +188,16 @@ export function buildProviderProfile(input: ProfileInput): PiAiProviderProfile {
   // user's decision and wins over the per-model auto-fill; only a template
   // without `reasoningEfforts` lets the models.dev-derived map through.
   const reasoning = input.template?.reasoningEfforts
+  // Retry policy: the built-in lenient proxied-upstream policy with the
+  // Config's per-section overrides merged over it (`backoff` merges deeply —
+  // a partial backoff override must not lose the other built-in delays).
+  const override = input.retryPolicy ?? {}
+  const retryPolicy: PiAiRetryPolicy = {
+    ...SUB2API_RETRY_POLICY,
+    ...override,
+    retryableCodes: [...(override.retryableCodes ?? SUB2API_RETRY_POLICY.retryableCodes)],
+    backoff: { ...SUB2API_RETRY_POLICY.backoff, ...override.backoff },
+  }
   return {
     displayName: input.displayName.length > 0 ? input.displayName : `Group ${input.groupId}`,
     apiKeyEnv: input.apiKeyEnv,
@@ -209,14 +225,11 @@ export function buildProviderProfile(input: ProfileInput): PiAiProviderProfile {
     // Provider-level default effort (pi-ai `reasoning`) — the UI preselects
     // it and drops its "provider default" option once present.
     ...(input.template?.reasoning !== undefined ? { reasoning: input.template.reasoning } : {}),
-    // Route-level defaults for models the enrichment could not match.
-    defaultContextWindow: 128000,
-    defaultMaxTokens: 8192,
+    // Route-level defaults for models the enrichment could not match —
+    // overridable per deployment (Config fields, same names).
+    defaultContextWindow: input.defaultContextWindow ?? 128000,
+    defaultMaxTokens: input.defaultMaxTokens ?? 8192,
     defaultInput: ['text'],
-    retryPolicy: {
-      ...SUB2API_RETRY_POLICY,
-      retryableCodes: [...SUB2API_RETRY_POLICY.retryableCodes],
-      backoff: { ...SUB2API_RETRY_POLICY.backoff },
-    },
+    retryPolicy,
   }
 }

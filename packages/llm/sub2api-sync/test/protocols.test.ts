@@ -69,6 +69,31 @@ describe('provider profile construction', () => {
     expect(profile.models).toEqual([{ id: 'claude-x' }])
   })
 
+  it('merges retry-policy overrides over the built-in policy (backoff deeply)', () => {
+    const profile = buildProviderProfile({
+      groupId: 7,
+      displayName: 'NexaRelay(Claude 拼车)',
+      protocol: 'anthropic-messages',
+      instance: 'https://gw.example.com',
+      apiKeyEnv: 'DSH_SUB2API_KEY_7',
+      models: [{ id: 'claude-x' }],
+      retryPolicy: { maxRetries: 2, backoff: { maxDelayMs: 30000 } },
+      defaultContextWindow: 200000,
+      defaultMaxTokens: 16384,
+    })
+    // Overridden keys win…
+    expect(profile.retryPolicy?.maxRetries).toBe(2)
+    expect(profile.retryPolicy?.backoff?.maxDelayMs).toBe(30000)
+    // …while untouched built-in keys (and the rest of backoff) inherit.
+    expect(profile.retryPolicy?.mode).toBe(SUB2API_RETRY_POLICY.mode)
+    expect(profile.retryPolicy?.retryableCodes).toEqual(SUB2API_RETRY_POLICY.retryableCodes)
+    expect(profile.retryPolicy?.backoff?.initialDelayMs).toBe(SUB2API_RETRY_POLICY.backoff.initialDelayMs)
+    expect(profile.retryPolicy?.backoff?.jitterRatio).toBe(SUB2API_RETRY_POLICY.backoff.jitterRatio)
+    // Route-level model defaults ride the Config fields.
+    expect(profile.defaultContextWindow).toBe(200000)
+    expect(profile.defaultMaxTokens).toBe(16384)
+  })
+
   it('falls back the display name to the group id', () => {
     const profile = buildProviderProfile({
       groupId: 3, displayName: '', protocol: 'openai-responses', instance: 'http://gw', apiKeyEnv: 'K', models: [{ id: 'a' }],

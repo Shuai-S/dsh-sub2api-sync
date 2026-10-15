@@ -25,9 +25,23 @@
  */
 
 import z from '@deepseek-ai/schemastery'
-import type { ModelTemplate } from './protocols.ts'
+import type { ModelTemplate, PiAiRetryPolicy } from './protocols.ts'
 import { DEFAULT_PROVIDER_NAME_TEMPLATE, type ApiProtocol } from './types.ts'
 import { THINKING_LEVELS, type ThinkingLevel } from './protocols.ts'
+
+/** Per-section overrides over the plugin's built-in lenient retry policy
+ * (`SUB2API_RETRY_POLICY`): an absent key inherits the built-in value.
+ * YAML-only advanced field (一字段一写面 — the tuning card does not render it). */
+export interface RetryPolicyOverride {
+  mode?: PiAiRetryPolicy['mode']
+  maxRetries?: number
+  retryableCodes?: string[]
+  backoff?: {
+    initialDelayMs?: number
+    maxDelayMs?: number
+    jitterRatio?: number
+  }
+}
 
 /** Per-group key-source options; `keyId` absent = 自动（组名建/复用）. */
 export interface Sub2apiSyncConfig {
@@ -59,6 +73,15 @@ export interface Sub2apiSyncConfig {
   deleteOrphanKeys?: boolean
   /** Scheduled resync interval; absent = off. */
   syncIntervalMs?: number
+  /** Retry policy overrides merged over the built-in policy every synced
+   * route carries (see `RetryPolicyOverride`). */
+  retryPolicy?: RetryPolicyOverride
+  /** Route-level context-window default for models the metadata enrichment
+   * cannot match. Default 128000. */
+  defaultContextWindow?: number
+  /** Route-level max-output-tokens default for models the metadata
+   * enrichment cannot match. Default 8192. */
+  defaultMaxTokens?: number
   /** Escape hatch: allow action routes from private-network peers (§11). Default false. */
   allowRemoteActions?: boolean
 }
@@ -95,6 +118,18 @@ export const Config: z<Sub2apiSyncConfig, any> = z.object({
   keyExpiresInDays: z.number().step(1).volatile(),
   deleteOrphanKeys: z.boolean().default(false).volatile(),
   syncIntervalMs: z.number().step(1).volatile(),
+  retryPolicy: z.object({
+    mode: z.union([z.const('normal'), z.const('always')]),
+    maxRetries: z.number().step(1),
+    retryableCodes: z.array(z.string()),
+    backoff: z.object({
+      initialDelayMs: z.number(),
+      maxDelayMs: z.number(),
+      jitterRatio: z.number(),
+    }),
+  }).volatile(),
+  defaultContextWindow: z.number().step(1).volatile(),
+  defaultMaxTokens: z.number().step(1).volatile(),
   allowRemoteActions: z.boolean().default(false).volatile(),
 })
 
@@ -158,6 +193,45 @@ export function validateConfig(config: Sub2apiSyncConfig): void {
   for (const id of config.selectedKeys ?? []) {
     if (!Number.isSafeInteger(id) || id <= 0) {
       throw new Error(`sub2api-sync: selectedKeys 含非法 key id ${String(id)}`)
+    }
+  }
+  // Values whose only alternative used to be a SILENT drop somewhere down the
+  // write path: the resync timer treated <60s as "off", createKey filtered
+  // non-positive quota/expiry at the panel call. Fail loudly at commit instead.
+  if (config.syncIntervalMs !== undefined && config.syncIntervalMs < 60_000) {
+    throw new Error('sub2api-sync: syncIntervalMs 定时同步间隔不能小于 60000ms（删除该字段即关闭定时同步）')
+  }
+  if (config.keyQuota !== undefined && config.keyQuota < 0) {
+    throw new Error('sub2api-sync: keyQuota 不能为负数')
+  }
+  if (config.keyExpiresInDays !== undefined && (!Number.isSafeInteger(config.keyExpiresInDays) || config.keyExpiresInDays < 1)) {
+    throw new Error('sub2api-sync: keyExpiresInDays 必须是 ≥1 的整数')
+  }
+  if (config.defaultContextWindow !== undefined && (!Number.isSafeInteger(config.defaultContextWindow) || config.defaultContextWindow <= 0)) {
+    throw new Error('sub2api-sync: defaultContextWindow 必须是正整数')
+  }
+  if (config.defaultMaxTokens !== undefined && (!Number.isSafeInteger(config.defaultMaxTokens) || config.defaultMaxTokens <= 0)) {
+    throw new Error('sub2api-sync: defaultMaxTokens 必须是正整数')
+  }
+  const retry = config.retryPolicy
+  if (retry !== undefined) {
+    if (retry.mode !== undefined && retry.mode !== 'normal' && retry.mode !== 'always') {
+      throw new Error('sub2api-sync: retryPolicy.mode 必须是 normal 或 always')
+    }
+    if (retry.maxRetries !== undefined && (!Number.isSafeInteger(retry.maxRetries) || retry.maxRetries < 0)) {
+      throw new Error('sub2api-sync: retryPolicy.maxRetries 必须是非负整数')
+    }
+    const backoff = retry.backoff
+    if (backoff !== undefined) {
+      if (backoff.initialDelayMs !== undefined && (!Number.isSafeInteger(backoff.initialDelayMs) || backoff.initialDelayMs < 0)) {
+        throw new Error('sub2api-sync: retryPolicy.backoff.initialDelayMs 必须是非负整数')
+      }
+      if (backoff.maxDelayMs !== undefined && (!Number.isSafeInteger(backoff.maxDelayMs) || backoff.maxDelayMs < 0)) {
+        throw new Error('sub2api-sync: retryPolicy.backoff.maxDelayMs 必须是非负整数')
+      }
+      if (backoff.jitterRatio !== undefined && (backoff.jitterRatio < 0 || backoff.jitterRatio > 1)) {
+        throw new Error('sub2api-sync: retryPolicy.backoff.jitterRatio 必须在 [0, 1] 之间')
+      }
     }
   }
 }
