@@ -64,6 +64,7 @@ function pack(name) {
 mkdirSync(outDir, { recursive: true })
 
 const packed = []
+let packError
 try {
   // Variant 1: canonical scoped name — files already carry it.
   pack(canonical)
@@ -85,9 +86,25 @@ try {
   writeFileSync(patchPath, patchAliased)
   pack(alias)
   packed.push({ name: alias, tgz: tgzOf(alias) })
+} catch (error) {
+  packError = error
 } finally {
   writeFileSync(pkgPath, pkgOriginal)
   writeFileSync(patchPath, patchOriginal)
+  // The last `pnpm pack` (the alias variant, or whichever variant ran before a
+  // mid-run failure) rebuilt lib/ under that variant's identity and left the
+  // artifacts in the working tree. The installed package is the canonical
+  // one, and a wrapper id that disagrees with it fatal-boots web boot
+  // ("duplicate factory registration"), so rebuild lib/ under the restored
+  // canonical identity on EVERY exit path — including failures.
+  const rebuild = spawnSync('pnpm', ['run', 'build'], { cwd: root, stdio: 'inherit', shell: process.platform === 'win32' })
+  if (packError !== undefined) {
+    if (rebuild.status !== 0) {
+      console.error('post-pack rebuild also failed — lib/ still carries the last variant\'s artifacts; run `pnpm build` to recover')
+    }
+    throw packError
+  }
+  if (rebuild.status !== 0) throw new Error('post-pack rebuild of the canonical artifacts failed — lib/ still carries the alias variant')
 }
 
 for (const { name, tgz } of packed) console.log(`packed ${name} -> ${tgz}`)
