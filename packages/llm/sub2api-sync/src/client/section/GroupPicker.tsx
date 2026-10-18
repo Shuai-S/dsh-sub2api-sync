@@ -156,13 +156,16 @@ export function GroupPicker({ groups, value, placeholder, searchPlaceholder, emp
           ref={panelRef}
           className="s2s-groupPanel"
           role="listbox"
-          style={position === null
-            ? { visibility: 'hidden' }
-            : {
-                ...position,
-                ...(triggerWidth > 0 ? { width: `${triggerWidth}px` } : {}),
-                maxHeight: `${maxHeight}px`,
-              }}
+          // maxHeight applies from the first paint (even while unpositioned):
+          // useAnchoredPosition measures the panel's offsetHeight to clamp its
+          // placement, and an uncapped first measure (search + every option)
+          // would shove the panel against the viewport top for a frame before
+          // the ResizeObserver re-fit converges.
+          style={{
+            ...(position === null ? { visibility: 'hidden' } : position),
+            ...(triggerWidth > 0 ? { width: `${triggerWidth}px` } : {}),
+            maxHeight: `${maxHeight}px`,
+          }}
           onKeyDown={onKeyDown}
         >
           <div className="s2s-groupSearch">

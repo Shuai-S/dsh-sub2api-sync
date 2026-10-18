@@ -312,8 +312,13 @@ const CSS = `
 
 /* The options panel: fixed-positioned from the trigger (escapes the modal
    card's overflow clip), width-matched to it, search pinned on top, options
-   scrolling below. */
+   scrolling below. position: fixed is load-bearing: MenuSurface defaults to
+   position: relative, and without this rule the panel becomes a flex item
+   inside the form row while the viewport-coordinate top/left from
+   useAnchoredPosition act as relative offsets — the panel displaces across
+   the dialog and stays clipped by the card (the blank floating box bug). */
 .s2s-groupPanel {
+  position: fixed;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
