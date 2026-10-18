@@ -13,7 +13,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Button, Checkbox, IconChevronDownOutlineRegular, Input, Menu, Modal, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Checkbox, Input, Modal, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { PanelKeyMeta } from '../../routes.ts'
@@ -25,6 +25,7 @@ import type { GroupsView } from '../../routes.ts'
 import type { NS } from '../locales.ts'
 import { refreshStatus } from '../status.ts'
 import type { PluginApi } from '../usePluginApi.ts'
+import { GroupPicker } from './GroupPicker.tsx'
 
 const PAGE_SIZE = 5
 const SEARCH_DEBOUNCE_MS = 300
@@ -49,7 +50,6 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
   const [loading, setLoading] = useState(false)
   const [listError, setListError] = useState<string | undefined>(undefined)
   const [creating, setCreating] = useState(false)
-  const [groupMenuOpen, setGroupMenuOpen] = useState(false)
   const [groupId, setGroupId] = useState<number | ''>('')
   const [name, setName] = useState('')
   const [nameTouched, setNameTouched] = useState(false)
@@ -131,6 +131,8 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
     setGroupId(gid)
     if (!nameTouched) setName(groupNameOf(gid))
   }
+
+  const selectGroup = (group: GroupsView): void => { pickGroup(group.id) }
 
   const closeCreate = (): void => {
     setCreating(false)
@@ -256,25 +258,14 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
         <div className="s2s-column">
           <div className="s2s-inline">
             <span className="s2s-fieldLabel">{t('keyGroupLabel')}</span>
-            <Menu
-              open={groupMenuOpen}
-              anchor={(
-                <span className="s2s-menuAnchor">
-                  <Button
-                    variant="outline"
-                    onClick={() => { setGroupMenuOpen(true) }}
-                  >
-                    <span className="s2s-selectTrigger">
-                      <span>{groupId === '' ? t('keyGroupPlaceholder') : groupNameOf(groupId)}</span>
-                      <IconChevronDownOutlineRegular size={14} className="s2s-selectChevron" />
-                    </span>
-                  </Button>
-                </span>
-              )}
-              items={groups.map((group) => ({ id: String(group.id), label: group.name }))}
-              selectedId={groupId === '' ? undefined : String(groupId)}
-              onSelect={(id) => { pickGroup(Number(id)); setGroupMenuOpen(false) }}
-              onClose={() => { setGroupMenuOpen(false) }}
+            <GroupPicker
+              groups={groups}
+              value={groupId}
+              placeholder={t('keyGroupPlaceholder')}
+              searchPlaceholder={t('keyGroupSearch')}
+              emptyLabel={t('keyGroupSearchEmpty')}
+              disabled={busy}
+              onSelect={selectGroup}
             />
           </div>
           <div className="s2s-inline">

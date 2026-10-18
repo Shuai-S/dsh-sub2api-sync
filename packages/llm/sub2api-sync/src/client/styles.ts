@@ -248,30 +248,135 @@ const CSS = `
   flex: 1 1 220px;
 }
 
-/* Menu anchor wrapper: give the picker trigger the same field-column
-   footprint as the sibling Input rows. */
-.s2s-menuAnchor {
+/* Group picker (create-key dialog): the trigger takes the same field-column
+   footprint as the sibling Input rows, painted like an input rather than a
+   button so both rows read as one form. */
+.s2s-groupPicker {
   display: flex;
   flex: 1 1 220px;
   min-width: 0;
 }
 
-.s2s-menuAnchor > * {
-  width: 100%;
-}
-
-/* Select-style trigger (group picker): label left, chevron right. */
-.s2s-selectTrigger {
+.s2s-selectField {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+
+.s2s-selectField:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.s2s-selectField:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+.s2s-selectPlaceholder {
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.s2s-selectValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .s2s-selectChevron {
   flex: none;
   opacity: 0.55;
+  transition: transform var(--ds-transition-duration) var(--ds-ease-in-out);
+}
+
+.s2s-selectChevronOpen {
+  transform: rotate(180deg);
+}
+
+/* The options panel: fixed-positioned from the trigger (escapes the modal
+   card's overflow clip), width-matched to it, search pinned on top, options
+   scrolling below. */
+.s2s-groupPanel {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  z-index: 10;
+  overflow: hidden;
+}
+
+.s2s-groupSearch {
+  flex: none;
+  padding: 8px 8px 6px;
+}
+
+.s2s-groupSearch > * {
+  width: 100%;
+}
+
+.s2s-groupList {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 8px 8px;
+}
+
+.s2s-groupEmpty {
+  margin: 0;
+  padding: 10px 4px;
+  color: var(--dsw-alias-label-tertiary);
+  text-align: center;
+}
+
+.s2s-groupOption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.s2s-groupOption[data-active='true'] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.s2s-groupOptionName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.s2s-groupOptionCheck {
+  flex: none;
+  color: var(--dsw-alias-state-business-primary);
 }
 
 /* The keys-card search input: fixed-width slot between the title and the
