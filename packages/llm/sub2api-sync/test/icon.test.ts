@@ -27,7 +27,7 @@ describe('pickIconHref', () => {
 })
 
 /** Scripted fetch double recording URLs; each answer is a plain object. */
-function scriptFetch(steps: Array<{ url: string; status?: number; contentType?: string; text?: string; buffer?: Buffer }>): { fetch: typeof fetch; urls: string[] } {
+function scriptFetch(steps: Array<{ url: string; status?: number; contentType?: string; text?: string; buffer?: Buffer; reject?: boolean }>): { fetch: typeof fetch; urls: string[] } {
   const urls: string[] = []
   let index = 0
   const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
@@ -37,6 +37,9 @@ function scriptFetch(steps: Array<{ url: string; status?: number; contentType?: 
     index++
     if (step.url !== url && step.url !== '*') {
       throw new Error(`unexpected fetch: ${url}`)
+    }
+    if (step.reject === true) {
+      throw new Error('network down')
     }
     if ((step.status ?? 200) >= 400) {
       return { ok: false, status: step.status, headers: new Map() } as unknown as Response
@@ -132,5 +135,42 @@ describe('createInstanceProbe', () => {
     await expect(probe.icon('not-a-url')).resolves.toBeUndefined()
     await expect(probe.siteName('')).resolves.toBeUndefined()
     expect(urls).toEqual([])
+  })
+
+  it('retries a failed first probe so the first sync does not pin the fallback name', async () => {
+    // Cold DNS/TLS right after login can fail the first read; the old probe
+    // cached that failure for 10 minutes and the first sync branded every
+    // provider `sub2api(…)`. One in-call retry recovers the title.
+    const { fetch, urls } = scriptFetch([
+      { url: 'http://panel:9000/', reject: true },
+      { url: 'http://panel:9000/', contentType: 'text/html', text: '<title>我的中转 - AI API Gateway</title>' },
+    ])
+    const probe = createInstanceProbe({ fetchImpl: fetch, retryDelayMs: 1 })
+    await expect(probe.siteName('http://panel:9000')).resolves.toBe('我的中转')
+    expect(urls.filter((url) => url === 'http://panel:9000/')).toHaveLength(2)
+  })
+
+  it('re-probes a title-less instance once the short negative window passes', async () => {
+    const { fetch, urls } = scriptFetch([
+      { url: 'http://panel:9000/', contentType: 'text/html', text: '<html><head></head></html>' },
+      { url: 'http://panel:9000/', contentType: 'text/html', text: '<html><head></head></html>' },
+      { url: 'http://panel:9000/', contentType: 'text/html', text: '<title>我的中转 - AI API Gateway</title>' },
+    ])
+    const probe = createInstanceProbe({ fetchImpl: fetch, retryDelayMs: 1, negativeTtlMs: 5 })
+    await expect(probe.siteName('http://panel:9000')).resolves.toBeUndefined()
+    await new Promise((resolve) => { setTimeout(resolve, 10) })
+    await expect(probe.siteName('http://panel:9000')).resolves.toBe('我的中转')
+    expect(urls.filter((url) => url === 'http://panel:9000/')).toHaveLength(3)
+  })
+
+  it('serves the title-less negative within the window without re-probing', async () => {
+    const { fetch, urls } = scriptFetch([
+      { url: 'http://panel:9000/', contentType: 'text/html', text: '<html><head></head></html>' },
+      { url: 'http://panel:9000/', contentType: 'text/html', text: '<html><head></head></html>' },
+    ])
+    const probe = createInstanceProbe({ fetchImpl: fetch, retryDelayMs: 1, negativeTtlMs: 60_000 })
+    await expect(probe.siteName('http://panel:9000')).resolves.toBeUndefined()
+    await expect(probe.siteName('http://panel:9000')).resolves.toBeUndefined()
+    expect(urls.filter((url) => url === 'http://panel:9000/')).toHaveLength(2)
   })
 })

@@ -187,6 +187,15 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
   // Instance icon + site-name probe (cached per instance in the closure).
   const instanceProbe = createInstanceProbe()
 
+  /** Warm the site-name cache at auth events. The first sync right after a
+   * login/authorization renders `{siteName}` — a cold probe there would
+   * brand the providers with the `sub2api` fallback name. Fire-and-forget:
+   * the probe's own negative-TTL window bounds any retry fetching. */
+  const warmProbe = (): void => {
+    const base = instance()
+    if (/^https?:\/\//i.test(base)) void instanceProbe.siteName(base).catch(() => undefined)
+  }
+
   // OAuth web channel (C2): attempts live in host memory only — the PKCE
   // verifier never leaves this process, and `state` is single-use.
   const oauthAttempts = new OAuthAttemptStore()
@@ -202,6 +211,9 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
       }
       await mutateOwn([{ op: 'set', path: ['email'], value: email }]).catch(() => undefined)
       const outcome = await gateway.login(email, pwd)
+      // The panel is proven reachable: warm the site-name cache while the
+      // user is still on the sign-in dialog, before the first sync.
+      warmProbe()
       if (outcome.kind === '2fa') {
         // First leg accepted the pair provisionally; the password persists
         // only after the second leg completes (see login2FA below).
@@ -219,8 +231,11 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
     },
     login2FA: async (code) => {
       await gateway.login2FA(code)
-      // The two-leg login just completed: the first leg's typed password is
-      // proven correct — persist it for the later password-less logins.
+      // The two-leg login just completed: warm the site-name cache before
+      // the card's first sync.
+      warmProbe()
+      // The first leg's typed password is proven correct — persist it for
+      // the later password-less logins.
       if (pendingTypedPassword !== undefined) {
         await credentials.set(panelPasswordRef(instance()), pendingTypedPassword).catch(() => undefined)
         pendingTypedPassword = undefined
@@ -402,6 +417,9 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
         })
         await gateway.storeOAuthTokens(pair)
         oauthAttempts.settle(attempt.id, 'completed')
+        // The web channel just proved the instance reachable: warm the
+        // site-name cache before the user's first sync.
+        warmProbe()
         // Success copy mirrors the official landing page verbatim; the
         // dynamic failure details stay as the provider/host produced them.
         const successMessage = lang === 'en'
@@ -415,6 +433,9 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
       }
     },
     oauthStatus: async (attemptId) => {
+      // The dialog polls while the user authorizes: each poll keeps the
+      // site-name cache warm, so the post-authorization sync starts hot.
+      warmProbe()
       const attempt = attemptId !== undefined ? oauthAttempts.peek(attemptId) : undefined
       const email = source().email
       return {

@@ -29,6 +29,14 @@ interface InstanceMeta {
 
 /** How long a resolved icon URL is trusted before re-reading the HTML. */
 const URL_TTL_MS = 10 * 60 * 1000
+/** How long a TITLE-LESS probe result is trusted before re-reading: the sync
+ * that renders `{siteName}` must not pin a 10-minute negative on a cold
+ * connection, or the first sync after login names every provider with the
+ * `sub2api` fallback until the cache expires. */
+const NEGATIVE_TTL_MS = 15_000
+/** One in-call retry wait when a fresh probe still answers without a title
+ * (cold DNS/TLS or a momentary gateway hiccup — not proof the title is absent). */
+const RETRY_DELAY_MS = 1_200
 /** Discovery + byte fetches cap, so an offline instance cannot stall callers. */
 const TIMEOUT_MS = 2500
 /** Refuse to proxy absurd payloads. */
@@ -140,12 +148,26 @@ function guessContentType(url: string): string {
  * the closure, so the icon and site-name consumers share one HTML read per
  * TTL window. Errors never throw — an unavailable answer resolves to
  * `undefined` and the client keeps its fallbacks.
+ *
+ * Title caching is two-tier: a RESOLVED title rides the shared 10-minute
+ * window, while a title-less result is only trusted for
+ * {@link NEGATIVE_TTL_MS} and one in-call retry backs the first read — the
+ * login-to-first-sync window is exactly when a cold connection would
+ * otherwise brand every provider with the `sub2api` fallback name.
  */
-export function createInstanceProbe(options: { fetchImpl?: typeof fetch } = {}): {
+export function createInstanceProbe(options: {
+  fetchImpl?: typeof fetch
+  /** Test knob: the title-less retry wait (default {@link RETRY_DELAY_MS}). */
+  retryDelayMs?: number
+  /** Test knob: the title-less negative-cache window (default {@link NEGATIVE_TTL_MS}). */
+  negativeTtlMs?: number
+} = {}): {
   icon: (instance: string) => Promise<IconPayload | undefined>
   siteName: (instance: string) => Promise<string | undefined>
 } {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch
+  const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS
+  const negativeTtlMs = options.negativeTtlMs ?? NEGATIVE_TTL_MS
   const cache = new Map<string, { meta: InstanceMeta; at: number }>()
   const metaOf = async (instance: string): Promise<InstanceMeta | undefined> => {
     const base = instance.trim().replace(/\/+$/, '')
@@ -157,6 +179,7 @@ export function createInstanceProbe(options: { fetchImpl?: typeof fetch } = {}):
     cache.set(base, { meta, at: now })
     return meta
   }
+  const wait = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
   return {
     icon: async (instance) => {
       const meta = await metaOf(instance)
@@ -172,6 +195,25 @@ export function createInstanceProbe(options: { fetchImpl?: typeof fetch } = {}):
         return undefined
       }
     },
-    siteName: async (instance) => (await metaOf(instance))?.title,
+    siteName: async (instance) => {
+      const base = instance.trim().replace(/\/+$/, '')
+      if (!/^https?:\/\//i.test(base)) return undefined
+      const now = Date.now()
+      const hit = cache.get(base)
+      // A resolved title serves from the shared window…
+      if (hit !== undefined && hit.meta.title !== undefined && now - hit.at < URL_TTL_MS) return hit.meta.title
+      // …while a title-less entry is trusted only briefly: the next call
+      // re-probes instead of pinning the fallback name for 10 minutes.
+      if (hit !== undefined && hit.meta.title === undefined && now - hit.at < negativeTtlMs) return undefined
+      const first = await probeInstance(base, fetchImpl)
+      cache.set(base, { meta: first, at: Date.now() })
+      if (first.title !== undefined) return first.title
+      // One bounded retry: a failed/slow first read says nothing about the
+      // instance's title. Only a fresh, still-title-less answer settles it.
+      await wait(retryDelayMs)
+      const second = await probeInstance(base, fetchImpl)
+      cache.set(base, { meta: second, at: Date.now() })
+      return second.title
+    },
   }
 }

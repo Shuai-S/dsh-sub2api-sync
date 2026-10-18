@@ -211,6 +211,7 @@ function makeEngine(options: {
   gateway?: FakeGateway
   fetchImpl?: typeof fetch
   modelIndex?: Map<string, { name?: string; contextWindow?: number; maxTokens?: number; imageInput?: boolean; reasoningEfforts?: Record<string, string | null> }>
+  siteName?: () => Promise<string | undefined>
 } = {}): { engine: Sub2apiSyncEngine; settings: FakeSettings; credentials: FakeCredentials; gateway: FakeGateway } {
   const settings = options.settings ?? new FakeSettings()
   const credentials = options.credentials ?? new FakeCredentials()
@@ -220,6 +221,7 @@ function makeEngine(options: {
     credentials,
     gateway: asGateway(gateway),
     ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
+    ...(options.siteName !== undefined ? { siteName: options.siteName } : {}),
     // Hermetic by default: no network fetch for the C4 enrichment.
     loadModelIndex: async () => options.modelIndex ?? new Map(),
   })
@@ -271,6 +273,28 @@ describe('Sub2apiSyncEngine.sync', () => {
     // The route must not leak the panel's sequential key id.
     expect(ROUTE).toMatch(/^sub2api-[0-9a-f]{10}$/)
     expect(ROUTE).not.toContain('5')
+  })
+
+  it('warns in the report when the site-name probe fails and the fallback name is used', async () => {
+    const { engine } = makeEngine({
+      fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }] }),
+      gateway: new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS)),
+      siteName: async () => undefined,
+    })
+    const report = await engine.sync(config({ selectedKeys: [5], providerNameTemplate: '{siteName}({keyName})' }))
+    expect(report.warnings.some((w) => w.includes('回退名 sub2api'))).toBe(true)
+    expect(report.entries[0]).toMatchObject({ displayName: 'sub2api(Claude 拼车)' })
+  })
+
+  it('renders the probed site name and stays silent when the probe resolves', async () => {
+    const { engine } = makeEngine({
+      fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }] }),
+      gateway: new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS)),
+      siteName: async () => '我的中转',
+    })
+    const report = await engine.sync(config({ selectedKeys: [5], providerNameTemplate: '{siteName}({keyName})' }))
+    expect(report.warnings).toEqual([])
+    expect(report.entries[0]).toMatchObject({ displayName: '我的中转(Claude 拼车)' })
   })
 
   it('is idempotent: the second sync writes nothing and keeps the same key', async () => {

@@ -257,6 +257,11 @@ export class Sub2apiSyncEngine {
     if (keyWalkTruncated) {
       syncWarnings.push('面板 key 数量超过单次同步的读取上限（10 页 × 100 = 1000 把）——超出部分未参与同步，也不会被移除')
     }
+    // The `{siteName}` placeholder fell back: say so, or the report silently
+    // names providers `sub2api(…)` and the cause stays invisible.
+    if (site === undefined && this.siteName !== undefined && (config.providerNameTemplate ?? '').includes('{siteName}')) {
+      syncWarnings.push('实例站点名探测失败（实例不可达或页面 <title> 缺失）——displayName 暂用回退名 sub2api，站点名可解析后的同步会自动更正')
+    }
     const effective = { ...config, selectedKeys: selection ?? config.selectedKeys }
     for (const target of resolveTargets(effective, keyRows)) {
       if ('invalid' in target) {
