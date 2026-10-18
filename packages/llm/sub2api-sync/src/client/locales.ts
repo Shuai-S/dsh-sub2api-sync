@@ -126,9 +126,13 @@ const zh = {
   keyCreated: '已创建并绑定：{name}',
   keysListEmpty: '还没有 key',
   keysListLoading: '正在读取 keys…',
+  keysSearchPlaceholder: '搜索 key…',
+  keysSearchEmpty: '没有匹配的 key',
   syncSelected: '同步所选（{count}）',
   syncSelectedDone: '同步完成：{ok}/{total} 条成功',
-  keysLoadMore: '加载更多（还有 {count} 个）',
+  keysPagePrev: '上一页',
+  keysPageNext: '下一页',
+  keysPageStatus: '第 {page} / {pages} 页 · 共 {total} 个',
 } as const
 
 export type Sub2apiSyncKey = keyof typeof zh
@@ -249,9 +253,13 @@ const en = {
   keyCreated: 'Created and bound: {name}',
   keysListEmpty: 'No keys yet',
   keysListLoading: 'Loading keys…',
+  keysSearchPlaceholder: 'Search keys…',
+  keysSearchEmpty: 'No keys match',
   syncSelected: 'Sync selected ({count})',
   syncSelectedDone: 'Synced: {ok}/{total} succeeded',
-  keysLoadMore: 'Load more ({count} left)',
+  keysPagePrev: 'Previous page',
+  keysPageNext: 'Next page',
+  keysPageStatus: 'Page {page} / {pages} · {total} keys',
 } satisfies Record<Sub2apiSyncKey, string>
 
 /** Both shipped dictionaries; registration requires every built-in locale. */

@@ -251,8 +251,12 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
     },
     lastReport: () => reports.report(),
     lastReportAt: () => reports.at(),
-    listKeys: async (page, pageSize): Promise<KeysListPage> => {
-      const result = await gateway.use((panel, token) => panel.listKeys(token, { page, pageSize }))
+    listKeys: async (page, pageSize, search): Promise<KeysListPage> => {
+      const result = await gateway.use((panel, token) => panel.listKeys(token, {
+        page,
+        pageSize,
+        ...(search !== undefined && search.length > 0 ? { search } : {}),
+      }))
       return {
         keys: result.items.map((key) => ({
           id: key.id,

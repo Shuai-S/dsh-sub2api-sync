@@ -469,3 +469,16 @@ authorize SPA 未检测到登录态 → 跳 console 登录页（`?next=/oauth-co
 配套清理（rev.6）：宿主 `/key`（粘贴）、`/group-keys`、`/discover` 三个路由及其 deps 与客户端 API 方法因语义过期（按分组写凭据）而移除；`/keys` 上下文改为「列表分页 + 创建」，与面板控制台调用形态逐参数对齐（`page`/`page_size`/`sort_by=created_at`/`sort_order=desc`/`timezone` + `X-User-UI-Request: 1`）。
 
 未决：面板掩码明文时的**按 key 粘贴**兜底通道（`POST /keys/paste {keyId, key}`）尚未实现；当前行为是响亮失败并提示管理员登录。
+
+## 16. rev.6.1 变更：Keys 卡搜索 + 分页（替代「加载更多」）
+
+Keys 卡列表由「首屏 5 条 + 加载更多追加」改为**服务端搜索 + 原生分页**：
+
+| 项 | 行为 |
+| --- | --- |
+| 搜索框 | 标题行内、刷新按钮左侧；输入防抖 300ms 后作为面板 `search` 过滤下发（`GET /api/v1/keys?search=…`，上游按 key 名称检索）；词项变化即回到第 1 页；空白词不下发（route 层 trim，panel 层再兜底） |
+| 分页 | 上一页 / 第 x / y 页 · 共 N 个 / 下一页；单页且无搜索词时隐藏整条 pager（搜索态即便 1/1 也显示，便于读结果数）；页码越界（搜索缩小结果）时自动收敛到最后一页 |
+| 竞态 | 每次请求带单调自增 id，乱序响应直接丢弃——连续输入不会画出过期页 |
+| 链路 | 客户端 `listKeys(page, pageSize, search?)` → 宿主 `GET /keys?search=` → `RouteDeps.listKeys(page, pageSize, search?)` → `panel.listKeys({ search })`，逐层可选参数，未传即旧行为 |
+
+创建 key 成功后仍回到第 1 页（新 key newest-first），但保留当前搜索词。

@@ -1,7 +1,7 @@
 /**
- * The keys card (rev.5 key-selection redesign): the instance's relay keys
- * listed newest-first, paged by the panel natively — the card loads the
- * first 5 and appends more with a 加载更多 button while `page < pages`.
+ * The keys card (rev.6.1): the instance's relay keys listed newest-first,
+ * searched server-side (the panel's `search` filter, debounced client-side)
+ * and paged natively — 上一页/下一页 walk `pages` as the panel reports it.
  * The top-right 创建 key action opens a modal (sign-in-dialog pattern):
  * pick a group from all groups, name defaults to the group name, creation
  * checks the new key into `selectedKeys` (the sync selection is the config
@@ -11,7 +11,7 @@
  * @module sub2api-sync/client/section/KeysCard
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button, Checkbox, IconChevronDownOutlineRegular, Input, Menu, Modal, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
@@ -27,6 +27,7 @@ import { refreshStatus } from '../status.ts'
 import type { PluginApi } from '../usePluginApi.ts'
 
 const PAGE_SIZE = 5
+const SEARCH_DEBOUNCE_MS = 300
 
 export interface KeysCardProps {
   api: PluginApi
@@ -39,9 +40,12 @@ export interface KeysCardProps {
 export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
   const snapshot = useConfigForm(config)
   const [keys, setKeys] = useState<PanelKeyMeta[]>([])
-  const [page, setPage] = useState(0)
+  const [search, setSearch] = useState('')
+  const [query, setQuery] = useState('')
+  const [page, setPage] = useState(1)
   const [pages, setPages] = useState(1)
   const [total, setTotal] = useState(0)
+  const [reloadTick, setReloadTick] = useState(0)
   const [loading, setLoading] = useState(false)
   const [listError, setListError] = useState<string | undefined>(undefined)
   const [creating, setCreating] = useState(false)
@@ -53,22 +57,46 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
   const [syncing, setSyncing] = useState(false)
   const [feedback, setFeedback] = useState<{ tone: 'ok' | 'error'; text: string } | undefined>(undefined)
 
-  // Append one page; page 0 means "not loaded yet".
-  const loadPage = (next: number): void => {
+  // Debounce typing into the applied search term; a changed term restarts
+  // at page 1 (the newest matches come first).
+  const appliedQueryRef = useRef(query)
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const next = search.trim()
+      if (appliedQueryRef.current !== next) {
+        appliedQueryRef.current = next
+        setQuery(next)
+        setPage(1)
+      }
+    }, SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [search])
+
+  // One fetch per (page, query, reload); a monotonic request id drops
+  // out-of-order answers so fast typing cannot paint a stale page.
+  const requestSeqRef = useRef(0)
+  useEffect(() => {
+    const requestId = ++requestSeqRef.current
     setLoading(true)
     setListError(undefined)
-    api.listKeys(next, PAGE_SIZE)
+    api.listKeys(page, PAGE_SIZE, query === '' ? undefined : query)
       .then((response) => {
-        setKeys((previous) => (next === 1 ? response.keys : [...previous, ...response.keys]))
+        if (requestSeqRef.current !== requestId) return
+        setKeys(response.keys)
         setPages(response.pages)
         setTotal(response.total)
-        setPage(next)
+        // A narrowed search can shrink `pages` under the current page —
+        // clamp instead of showing the panel's empty out-of-range page.
+        if (response.pages > 0 && page > response.pages) setPage(response.pages)
       })
-      .catch((cause: unknown) => { setListError(cause instanceof Error ? cause.message : String(cause)) })
-      .finally(() => { setLoading(false) })
-  }
-
-  useEffect(() => { loadPage(1) }, [api])
+      .catch((cause: unknown) => {
+        if (requestSeqRef.current !== requestId) return
+        setListError(cause instanceof Error ? cause.message : String(cause))
+      })
+      .finally(() => {
+        if (requestSeqRef.current === requestId) setLoading(false)
+      })
+  }, [api, page, query, reloadTick])
 
   const selectedIds = snapshot.value?.selectedKeys ?? []
 
@@ -123,7 +151,10 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
         await setField(config, 'selectedKeys', [...nextSet].sort((a, b) => a - b))
         setFeedback({ tone: 'ok', text: t('keyCreated', { name: response.key.name }) })
         closeCreate()
-        loadPage(1)
+        // New keys sort newest-first: land on page 1 (keeping the search)
+        // and refetch.
+        setPage(1)
+        setReloadTick((tick) => tick + 1)
       })
       .catch((cause: unknown) => { setFeedback({ tone: 'error', text: cause instanceof Error ? cause.message : String(cause) }) })
       .finally(() => { setBusy(false) })
@@ -141,7 +172,14 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
       <div className="s2s-row">
         <span className="s2s-name">{t('keysTitle')}</span>
         <div className="s2s-actions">
-          <Button variant="outline" onClick={() => { loadPage(1) }}>{t('groupsRefresh')}</Button>
+          <Input
+            className="s2s-searchInput"
+            type="text"
+            value={search}
+            placeholder={t('keysSearchPlaceholder')}
+            onChange={(event) => { setSearch(event.target.value) }}
+          />
+          <Button variant="outline" onClick={() => { setReloadTick((tick) => tick + 1) }}>{t('groupsRefresh')}</Button>
           <Button
             variant="primary"
             disabled={syncing || selectedIds.length === 0}
@@ -157,7 +195,9 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
         <p className={`s2s-feedback ${feedback.tone === 'ok' ? 's2s-feedbackOk' : 's2s-feedbackError'}`}>{feedback.text}</p>
       )}
       {listError !== undefined && <p className="s2s-feedback s2s-feedbackError">{listError}</p>}
-      {!loading && keys.length === 0 && listError === undefined && <p className="s2s-feedback s2s-hint">{t('keysListEmpty')}</p>}
+      {!loading && keys.length === 0 && listError === undefined && (
+        <p className="s2s-feedback s2s-hint">{query !== '' ? t('keysSearchEmpty') : t('keysListEmpty')}</p>
+      )}
       {loading && keys.length === 0 && <p className="s2s-feedback s2s-hint">{t('keysListLoading')}</p>}
       {keys.length > 0 && (
         <div className="s2s-column">
@@ -198,10 +238,16 @@ export function KeysCard({ api, config, groups, t }: KeysCardProps): ReactNode {
           })}
         </div>
       )}
-      {keys.length > 0 && page < pages && (
-        <div className="s2s-actions">
-          <Button variant="outline" disabled={loading} onClick={() => { loadPage(page + 1) }}>
-            {t('keysLoadMore', { count: Math.max(0, Math.min(PAGE_SIZE, total - keys.length)) })}
+      {/* The pager hides on a quiet single page, but stays visible during a
+          search so the result count stays readable even at 1/1. */}
+      {keys.length > 0 && (pages > 1 || query !== '') && (
+        <div className="s2s-pager">
+          <Button variant="outline" disabled={loading || page <= 1} onClick={() => { setPage(page - 1) }}>
+            {t('keysPagePrev')}
+          </Button>
+          <span className="s2s-pageStatus">{t('keysPageStatus', { page, pages, total })}</span>
+          <Button variant="outline" disabled={loading || page >= pages} onClick={() => { setPage(page + 1) }}>
+            {t('keysPageNext')}
           </Button>
         </div>
       )}

@@ -312,8 +312,9 @@ export interface RouteDeps {
   sync(keyIds?: number[]): Promise<SyncReport>
   lastReport(): SyncReport | undefined
   lastReportAt(): number | undefined
-  /** One page of the panel's keys (newest first; page is 1-based). */
-  listKeys(page: number, pageSize: number): Promise<KeysListPage>
+  /** One page of the panel's keys (newest first; page is 1-based), optional
+   * server-side `search` over key names. */
+  listKeys(page: number, pageSize: number, search?: string): Promise<KeysListPage>
   /** Create one relay key (name defaults to the group name upstream of this seam). */
   createKey(input: { groupId: number; name: string }): Promise<PanelKeyMeta>
   /** The instance's icon bytes (declared `<link rel=icon>` → /favicon.ico), or undefined. */
@@ -475,7 +476,9 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
           const rawSize = Number(url.searchParams.get('pageSize') ?? '5')
           const page = Number.isSafeInteger(rawPage) && rawPage > 0 ? rawPage : 1
           const pageSize = Number.isSafeInteger(rawSize) && rawSize > 0 ? Math.min(rawSize, 50) : 5
-          const result = await deps.listKeys(page, pageSize)
+          const rawSearch = (url.searchParams.get('search') ?? '').trim()
+          const search = rawSearch.length > 0 ? rawSearch : undefined
+          const result = await deps.listKeys(page, pageSize, search)
           json(res, 200, { ok: true, keys: result.keys, total: result.total, pages: result.pages } satisfies KeysResponse)
         } catch (error) {
           json(res, 400, { ok: false, error: safeMessage(error) })

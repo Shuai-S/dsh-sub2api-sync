@@ -280,7 +280,7 @@ export class PanelClient {
    * `sort_by=created_at&sort_order=desc`, mirroring the console call shape).
    * Callers that need every key walk `pages` themselves.
    */
-  async listKeys(token: string, options?: { groupId?: number; page?: number; pageSize?: number; sortBy?: string; sortOrder?: string }): Promise<PanelKeyPage> {
+  async listKeys(token: string, options?: { groupId?: number; page?: number; pageSize?: number; search?: string; sortBy?: string; sortOrder?: string }): Promise<PanelKeyPage> {
     const page = options?.page ?? 1
     const pageSize = options?.pageSize ?? 20
     const query = new URLSearchParams({
@@ -291,6 +291,8 @@ export class PanelClient {
       timezone: timeZoneOf(),
     })
     if (options?.groupId !== undefined) query.set('group_id', String(options.groupId))
+    const search = options?.search?.trim()
+    if (search !== undefined && search.length > 0) query.set('search', search)
     const data = await this.call(token, 'GET', `/keys?${query.toString()}`)
     const record = data as { items?: unknown; total?: unknown; pages?: unknown } | null | undefined
     const items = record?.items

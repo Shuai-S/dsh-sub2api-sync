@@ -74,7 +74,7 @@ export interface PluginApi {
   login2fa(code: string): Promise<LoginResponse>
   logout(): Promise<{ ok: true }>
   groups(): Promise<GroupsResponse>
-  listKeys(page: number, pageSize: number): Promise<KeysResponse>
+  listKeys(page: number, pageSize: number, search?: string): Promise<KeysResponse>
   createKey(input: { groupId: number; name: string }): Promise<CreateKeyResponse>
   site(): Promise<SiteResponse>
   account(): Promise<AccountResponse>
@@ -98,7 +98,9 @@ export function createPluginApi(): PluginApi {
     login2fa: (code) => callJson<LoginResponse>(ROUTES.login2fa, post({ code })),
     logout: () => callJson<{ ok: true }>(ROUTES.logout, post()),
     groups: () => callJson<GroupsResponse>(ROUTES.groups),
-    listKeys: (page, pageSize) => callJson<KeysResponse>(`${ROUTES.keys}?page=${page}&pageSize=${pageSize}`),
+    listKeys: (page, pageSize, search) => callJson<KeysResponse>(
+      `${ROUTES.keys}?page=${page}&pageSize=${pageSize}${search !== undefined && search.length > 0 ? `&search=${encodeURIComponent(search)}` : ''}`,
+    ),
     createKey: (input) => callJson<CreateKeyResponse>(ROUTES.keys, post(input)),
     site: () => callJson<SiteResponse>(ROUTES.site),
     account: () => callJson<AccountResponse>(ROUTES.account),

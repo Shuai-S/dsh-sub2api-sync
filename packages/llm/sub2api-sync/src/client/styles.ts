@@ -274,6 +274,31 @@ const CSS = `
   opacity: 0.55;
 }
 
+/* The keys-card search input: fixed-width slot between the title and the
+   action buttons (see the s2s-actions flex layout). */
+.s2s-searchInput {
+  flex: none;
+  width: 220px;
+}
+
+/* The keys-card pager: centered prev / status / next strip. */
+.s2s-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-height: 32px;
+}
+
+.s2s-pageStatus {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* U2 placements: the provider-card badge, the Models-page footer strip, and
    the Plugins-page activation steps. */
 .s2s-badgeRow {

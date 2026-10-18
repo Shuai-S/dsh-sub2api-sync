@@ -191,6 +191,17 @@ describe('PanelClient', () => {
     expect(calls[0]?.body).toEqual({ name: 'Claude 拼车', group_id: 1, expires_in_days: 30 })
   })
 
+  it('forwards the keys search filter and omits it when blank', async () => {
+    const { fetchImpl, calls } = makeServer(() => ok({ items: [], total: 0, page: 1, page_size: 5, pages: 0 }))
+    const client = new PanelClient({ baseURL: BASE, fetchImpl })
+    await client.listKeys('t', { page: 1, pageSize: 5, search: '国庆 国模' })
+    await client.listKeys('t', { page: 1, pageSize: 5, search: '  ' })
+    const paths = calls.map((call) => call.path)
+    // URLSearchParams renders the space as `+`; decode to compare the term.
+    expect(new URL(`http://x${paths[0]}`).searchParams.get('search')).toBe('国庆 国模')
+    expect(paths[1]).not.toContain('search=')
+  })
+
   it('deletes keys by id', async () => {
     const { fetchImpl, calls } = makeServer(() => ok(null))
     const client = new PanelClient({ baseURL: BASE, fetchImpl })

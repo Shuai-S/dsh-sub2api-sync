@@ -72,7 +72,7 @@ function depsStub(overrides: Partial<RouteDeps> = {}): RouteDeps {
     sync: async () => ({ entries: [{ groupId: 2, route: 'sub2api-2', displayName: 'NexaRelay(key)', action: 'created', models: 3 }], removed: [], writes: 1, attempts: 1, warnings: [] }),
     lastReport: () => undefined,
     lastReportAt: () => undefined,
-    listKeys: async (page: number, _pageSize: number) => ({
+    listKeys: async (page: number, _pageSize: number, _search?: string) => ({
       keys: [
         { id: 42, name: 'claude-max[号池]', groupId: 4, status: 'active' },
         ...(page > 1 ? [{ id: 99, name: 'next-page', groupId: 4, status: 'active' }] : []),
@@ -231,6 +231,20 @@ describe('keys routes', () => {
     const { status, body } = await call(handlers, ROUTES.keys)
     expect(status).toBe(200)
     expect(body?.keys).toEqual([{ id: 42, name: 'claude-max[号池]', groupId: 4, status: 'active' }])
+  })
+
+  it('forwards the search filter, dropping blank terms', async () => {
+    const seen: Array<string | undefined> = []
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub({
+      listKeys: async (_page: number, _pageSize: number, search?: string) => {
+        seen.push(search)
+        return { keys: [], total: 0, pages: 1 }
+      },
+    }))
+    await call(handlers, ROUTES.keys, { url: `${ROUTES.keys}?page=2&pageSize=5&search=${encodeURIComponent('国庆 国模')}` })
+    await call(handlers, ROUTES.keys, { url: `${ROUTES.keys}?search=%20%20` })
+    expect(seen).toEqual(['国庆 国模', undefined])
   })
 
   it('creates a key with validation', async () => {
