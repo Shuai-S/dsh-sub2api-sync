@@ -358,11 +358,20 @@ export interface RouteDeps {
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>
 
-/** Register all card routes on the web server (no-op without one). */
+/** Register all card routes on the web server (no-op without one).
+ *
+ * Lifecycle: every registration's disposer rides the registering inject fiber
+ * (`webCtx.effect`). A plugin reload must remove its routes BEFORE the next
+ * apply re-registers them — the webserver rejects duplicate (kind, path)
+ * entries, and a dropped disposer would orphan the old entries: the new apply
+ * fails silently (an inject child failure does not fail the plugin fiber) and
+ * the table keeps serving the disposed fiber's closures, whose every service
+ * access then throws `cannot get required service … in inactive context`
+ * (the OAuth callback's 授权失败). */
 export function registerRoutes(ctx: Context, deps: RouteDeps): void {
   ctx.inject(['webServer'], (webCtx) => {
     const route = (path: string, handler: Handler): void => {
-      webCtx.webServer.register({ kind: 'exact', path, handler })
+      webCtx.effect(() => webCtx.webServer.register({ kind: 'exact', path, handler }))
     }
     const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
       if (!trustedRequest(req, deps.allowRemote())) {
@@ -645,6 +654,11 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
         json(res, 400, { ok: false, error: safeMessage(error) })
       }
     })
+  }).then(undefined, (error: unknown) => {
+    // An inject child's failure does NOT fail the plugin fiber: without this
+    // net a registration failure (e.g. a stale duplicate route) would strand
+    // dead routes with no visible trace.
+    ctx.logger.error(error)
   })
 }
 

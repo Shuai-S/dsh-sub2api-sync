@@ -45,17 +45,32 @@ function response(): Captured & ServerResponse {
 }
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>
-type WebServerLike = { register(r: { path: string; handler: RouteHandler }): void }
-type CtxWithServer = { inject(deps: unknown, fn: (scope: { webServer: WebServerLike }) => void): void }
+type WebServerLike = { register(r: { path: string; handler: RouteHandler }): () => void }
+type InjectFiber = { then(onFulfilled: undefined, onRejected: (error: unknown) => void): unknown }
+type CtxWithServer = { inject(deps: unknown, fn: (scope: { webServer: WebServerLike; effect(execute: () => () => void): void }) => void): InjectFiber }
 
-function fakeCtx(): { ctx: Context; handlers: Map<string, RouteHandler> } {
+function fakeCtx(): { ctx: Context; handlers: Map<string, RouteHandler>; disposers: Array<() => void> } {
   const handlers = new Map<string, RouteHandler>()
+  const disposers: Array<() => void> = []
   const ctx: CtxWithServer = {
-    inject(_deps: unknown, fn: (scope: { webServer: WebServerLike }) => void) {
-      fn({ webServer: { register: (r) => { handlers.set(r.path, r.handler) } } })
+    inject(_deps: unknown, fn: (scope: { webServer: WebServerLike; effect(execute: () => () => void): void }) => void): InjectFiber {
+      fn({
+        webServer: {
+          register: (r) => {
+            handlers.set(r.path, r.handler)
+            const unregister = () => { handlers.delete(r.path) }
+            disposers.push(unregister)
+            return unregister
+          },
+        },
+        // The fix ties each route's disposer to the registering inject fiber.
+        effect: (execute) => { execute() },
+      })
+      // The real inject returns the child fiber (a thenable); it never rejects here.
+      return { then: () => undefined }
     },
   }
-  return { ctx: ctx as unknown as Context, handlers }
+  return { ctx: ctx as unknown as Context, handlers, disposers }
 }
 
 function depsStub(overrides: Partial<RouteDeps> = {}): RouteDeps {
@@ -470,5 +485,47 @@ describe('oauthCallback route locale', () => {
     await run('en-US,en;q=0.9')
     await run()
     expect(langs).toEqual(['zh', 'en', 'zh'])
+  })
+})
+
+describe('route lifecycle', () => {
+  // Real cordis: the route disposers MUST ride the registering inject fiber.
+  // A dropped disposer orphans the entries on plugin reload — the next apply
+  // then hits `webserver: duplicate route` and fails silently, and the table
+  // keeps serving the disposed fiber's closures, whose service access throws
+  // `cannot get required service "credentials" in inactive context` (the
+  // OAuth callback's 授权失败). Regression: dispose must empty the table.
+  it('removes its routes when the plugin fiber unloads, so a reload re-registers cleanly', async () => {
+    const { Context } = await import('@deepseek-ai/cordis')
+    const table = new Map<string, unknown>()
+    const root = new Context()
+    root.provide('webServer', {
+      register(route: { path: string }) {
+        table.set(route.path, route)
+        return () => { table.delete(route.path) }
+      },
+    })
+    root.provide('credentials', { resolve: async () => undefined, set: async () => {}, unset: async () => {} })
+
+    const makePlugin = () => ({
+      name: 'route-lifecycle-under-test',
+      inject: ['credentials'],
+      apply(pluginCtx: Context): void {
+        registerRoutes(pluginCtx, depsStub())
+      },
+    })
+
+    const fiber = root.plugin(makePlugin())
+    await fiber.await()
+    expect(table.size).toBe(Object.keys(ROUTES).length)
+
+    // A re-install / HMR reload disposes the old fiber permanently.
+    await fiber.dispose()
+    expect(table.size).toBe(0)
+
+    // The next apply must register every path again, no duplicates.
+    const next = root.plugin(makePlugin())
+    await next.await()
+    expect(table.size).toBe(Object.keys(ROUTES).length)
   })
 })
