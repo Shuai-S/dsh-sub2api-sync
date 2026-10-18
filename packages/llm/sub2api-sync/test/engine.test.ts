@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { PI_AI_NS, createSyncReportStore, resolveTargets, Sub2apiSyncEngine, type SettingsPathOp, type SettingsLike, type SyncReport } from '../src/engine.ts'
 import type { Sub2apiSyncConfig } from '../src/config.ts'
+import { bundledIndex } from '../src/enrich.ts'
 import type { PanelGateway, PanelGroup, PanelKey } from '../src/panel.ts'
 import { legacyKeyRef, routeForKey, routeKeyRef } from '../src/types.ts'
 
@@ -448,6 +449,32 @@ describe('Sub2apiSyncEngine.sync', () => {
     await engine.sync(config({ selectedKeys: [5], compatTemplate: { reasoningEfforts: false } }))
     const disabled = settings.providers[ROUTE] as { models: Array<Record<string, unknown>> }
     expect(disabled.models[0].reasoningEfforts).toBe(false)
+  })
+
+  it('repairs native Claude effort mode on resync without changing legacy models or rewriting twice', async () => {
+    const { engine, settings } = makeEngine({
+      gateway: new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS)),
+      modelIndex: bundledIndex(),
+      fetchImpl: fetchAnswering({ data: [{ id: 'claude-opus-4-8' }, { id: 'claude-opus-4-5' }] }),
+    })
+    // An existing managed route from before the fix advertised Max but omitted
+    // the SDK's native adaptive mode. The next sync must repair it in place.
+    settings.providers[ROUTE] = {
+      api: 'anthropic-messages', models: [{ id: 'claude-opus-4-8', reasoningEfforts: { max: 'max' } }],
+    }
+    const report = await engine.sync(config({ selectedKeys: [5] }))
+    expect(report.entries[0]).toMatchObject({ route: ROUTE, action: 'updated' })
+    const profile = settings.providers[ROUTE] as { api: string; models: Array<Record<string, unknown>> }
+    expect(profile.api).toBe('anthropic-messages')
+    expect(profile.models[0]).toMatchObject({
+      id: 'claude-opus-4-8', reasoningEfforts: { xhigh: 'xhigh', max: 'max' },
+      compat: { forceAdaptiveThinking: true },
+    })
+    expect(profile.models[1]).not.toHaveProperty('compat')
+
+    const again = await engine.sync(config({ selectedKeys: [5] }))
+    expect(again.writes).toBe(0)
+    expect(again.entries[0]).toMatchObject({ route: ROUTE, action: 'unchanged' })
   })
 
   it('writes the template default effort only when every model supports it', async () => {

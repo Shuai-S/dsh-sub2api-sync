@@ -92,7 +92,8 @@ dsh plugin --profile web add ./packages/llm/sub2api-sync
 
 - 每分组一个 provider、一把 relay key；模型目录来自实例发现；逐模型 `compat` 继承用户模板；推理档位 `reasoningEfforts` 模板显式设置优先，未设置时按模型自动填充（见下）；
 - **模型元数据补全（C4）**：同步时按模型 id 从 models.dev 目录补全**显示名称**（`name`，即模型目录编辑器「显示名称」列）/`contextWindow`/`maxTokens`/图片输入/推理档位——`enrichModelMeta` 开启（缺省）时联网拉取（24h 进程内缓存），失败自动降级到**随包内置快照**（`data/models-dev.snapshot.json`，`pnpm --filter @mangoc/dsh-sub2api-sync models:refresh` 重新生成）；关闭则只用内置快照（离线确定）；两者都未命中的模型保持路由级缺省 128000/8192/纯文本；
-- **推理档位自动填充**：取 models.dev 条目的 `reasoning_options` 中 `effort` 枚举，映射为 pi-ai 的 `reasoningEfforts`（`none` → `off: null`，其余同名直传）。合并按 **first-party 优先**：官方厂商条目（openai/anthropic/google/zhipuai/zai/deepseek/moonshotai/xai/alibaba 等及官方云托管）存在即胜出——官方条目无 effort 数据（如 claude/gemini 的 budget-only）同样压制聚合商的虚报词表；无官方条目时聚合商来源取**交集**。优先级：**模板显式设置（含 `false`）> 每模型自动填充 > 不写字段**；显示名 = `providerNameTemplate` 渲染的 key 名。
+- **推理档位自动填充**：取 models.dev 条目的 `reasoning_options` 中 `effort` 枚举，映射为 pi-ai 的 `reasoningEfforts`（`none` → `off: null`，其余同名直传）。合并按 **first-party 优先**：官方厂商条目（openai/anthropic/google/zhipuai/zai/deepseek/moonshotai/xai/alibaba 等及官方云托管）存在即胜出——官方条目无 effort 数据（如旧版 Claude/Gemini 的 budget-only 条目）同样压制聚合商的虚报词表；无官方条目时聚合商来源取**交集**。优先级：**模板显式设置（含 `false`）> 每模型自动填充 > 不写字段**；显示名 = `providerNameTemplate` 渲染的 key 名。
+- **Claude 原生推理档位**：对已确认支持 adaptive thinking、且目录有 effort 元数据的 Claude 模型（如 Opus 4.6/4.7/4.8、Sonnet 4.6），仅在 `anthropic-messages` 协议下逐模型自动补齐 `compat.forceAdaptiveThinking: true`。该开关让 SDK 直接发送 Claude 原生的 `thinking: { type: "adaptive" }` 与 `output_config: { effort: "max" }`（以选择 Max 为例），不经过 OpenAI 协议转换，也不将 Max 降成 token budget。用户模板中同名 compat 字段（包括显式 `false`）优先；关闭 reasoning、旧模型、未知别名/新版本、缺少目录 effort 元数据或其他协议都不会自动开启。更新插件并重新同步即可修复已有受管路由，重复同步不重复写入；无需修改 sub2api 的记录值。注意：用量日志的 effort 是请求声明档位，不是实际思考量的测量值。
 - **显示名称富化**：取 models.dev 条目的 `name` 写入 pi-ai 模型条目的 `name` 字段（模型选择器与「已自定义模型目录」编辑器的显示名）；剥离 models.dev 的 " (latest)" 家族标记，名称与模型 id 相同（无信息量）时不写；合并同样 first-party 优先（官方名称覆盖，聚合商名称仅补缺），纯名称条目也参与富化。
 
 ## Known Limitations and Deferred Work
@@ -104,7 +105,7 @@ dsh plugin --profile web add ./packages/llm/sub2api-sync
 - **客户端半部只允许基线外部模块**（React / Cordis / ui-primitives / ui-slots / client-store / ui-dockkit）——客户端代码不得值导入 `config.ts`（会把 schemastery 拽进浏览器 bundle，动态模块表无此行，加载即静默失败）；`test/client-bundle.test.ts` 是产物守卫。
 - 实例前置 Cloudflare 时，需在 zone 放行 `/api/v1/*` 的宿主侧调用（WAF skip 规则）。
 - 元数据补全会向 models.dev 发起一次公开目录请求（不带任何凭据与对话内容）；`enrichModelMeta: false` 可完全离线（仅内置快照）。
-- 推理档位自动填充只覆盖 models.dev 提供 `effort` 枚举的模型（OpenAI gpt-5 系/o3、GLM 5.x、Qwen3.8、DeepSeek V4 系等）；`toggle`/`budget_tokens` 型推理（claude 系、gemini 系、deepseek-v3.2、kimi-k2.x 等）的线上形态不是 effort 字符串，`reasoningEfforts` 无法表达，仍由模板/`compat` 管辖。
+- 推理档位自动填充只覆盖 models.dev 提供 `effort` 枚举的模型（OpenAI gpt-5 系/o3、GLM 5.x、Qwen3.8、DeepSeek V4 系等）；`toggle`/`budget_tokens` 型推理（旧版 Claude、Gemini、deepseek-v3.2、kimi-k2.x 等）的线上形态不是 effort 字符串，`reasoningEfforts` 无法表达，仍由模板/`compat` 管辖。
 - 用量查询（`GET /v1/usage`）是已决策的非目标。
 - 与社区插件 `GodD6366/dsh-sub2api` 同装：路由名不冲突（本插件 `sub2api-<10-hex>` 摘要形态），各自管理条目与凭据引用。
 

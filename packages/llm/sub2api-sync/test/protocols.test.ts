@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { baseURLForProtocol, buildProviderProfile, guessPlatformFromModels, protocolForPlatform, renderProviderName, SUB2API_RETRY_POLICY } from '../src/protocols.ts'
 import type { Sub2apiSyncConfig } from '../src/config.ts'
+import { bundledIndex } from '../src/enrich.ts'
 import { isOwnedRoute, legacyKeyIdOfRoute, legacyKeyRef, panelRefreshRef, panelTokenRef, parseGroupId, platformLabel, routeForKey, routeKeyRef, sha256Hex, suffixOfRoute } from '../src/types.ts'
 
 describe('platformLabel', () => {
@@ -176,6 +177,76 @@ describe('provider profile construction', () => {
       models: [{ id: 'a' }], template: { reasoningEfforts: { low: 'low', high: 'high' } },
     })
     expect(levels.models?.[0]?.reasoningEfforts).toEqual({ low: 'low', high: 'high' })
+  })
+
+  describe('native Claude effort dispatch', () => {
+    const efforts = { low: 'low', high: 'high', max: 'max' }
+    const build = (models = [{ id: 'claude-opus-4-8', reasoningEfforts: efforts }], template?: {
+      compat?: Record<string, unknown>
+      reasoningEfforts?: false | Record<string, string | null>
+    }, protocol: 'anthropic-messages' | 'openai-completions' | 'openai-responses' = 'anthropic-messages') => buildProviderProfile({
+      groupId: 1, displayName: 'X', protocol, instance: 'http://gw', apiKeyEnv: 'K', models, template,
+    })
+
+    it('pairs the shipped Opus 4.8 effort map with native adaptive thinking', () => {
+      const meta = bundledIndex().get('claude-opus-4-8')!
+      const profile = buildProviderProfile({
+        groupId: 1, displayName: 'X', protocol: 'anthropic-messages', instance: 'http://gw', apiKeyEnv: 'K',
+        models: [{ id: 'claude-opus-4-8', ...meta }],
+      })
+      expect(profile.models?.[0]).toMatchObject({
+        reasoningEfforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+        compat: { forceAdaptiveThinking: true },
+      })
+      expect(profile).not.toHaveProperty('compat')
+    })
+
+    it.each([
+      'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8',
+      'claude-sonnet-4-6', 'claude-sonnet-5', 'claude-sonnet-5-5',
+      'claude-opus-5', 'claude-opus-5-5', 'claude-haiku-5-5',
+      'claude-fable-5', 'claude-fable-5-1',
+      'claude-opus-4.8', 'claude-opus-4-8-fast', 'claude-opus-4-8-think',
+      'claude-opus-4-8-thinking', 'claude-opus-4-8@eu', 'claude-opus-4-8@default',
+    ])('enables native adaptive thinking for the confirmed model %s', (id) => {
+      expect(build([{ id, reasoningEfforts: efforts }]).models?.[0]?.compat).toEqual({ forceAdaptiveThinking: true })
+    })
+
+    it.each([
+      'claude-3-7-sonnet-latest', 'claude-opus-4-1-20250805', 'claude-opus-4-5',
+      'claude-sonnet-4-5', 'claude-haiku-4-5', 'claude-opus-4-80',
+      'claude-opus-4-9', 'claude-custom', 'glm-5.3-flash', 'gpt-5.2',
+    ])('does not infer adaptive support just from an effort map for %s', (id) => {
+      expect(build([{ id, reasoningEfforts: efforts }]).models?.[0]).not.toHaveProperty('compat')
+    })
+
+    it('keeps models without catalog effort metadata on their existing path', () => {
+      const profile = buildProviderProfile({
+        groupId: 1, displayName: 'X', protocol: 'anthropic-messages', instance: 'http://gw', apiKeyEnv: 'K',
+        models: [{ id: 'claude-opus-4-8' }], template: { reasoningEfforts: efforts },
+      })
+      expect(profile.models?.[0]).not.toHaveProperty('compat')
+    })
+
+    it.each(['openai-completions', 'openai-responses'] as const)('does not leak Anthropic compat into %s', (protocol) => {
+      expect(build(undefined, undefined, protocol).models?.[0]).not.toHaveProperty('compat')
+    })
+
+    it('merges unrelated template switches while preserving an explicit false override', () => {
+      const template = { compat: { supportsTemperature: false } }
+      const profile = build(undefined, template)
+      expect(profile.models?.[0]?.compat).toEqual({ forceAdaptiveThinking: true, supportsTemperature: false })
+      expect(template.compat).toEqual({ supportsTemperature: false })
+      expect(profile.models?.[0]?.compat).not.toBe(template.compat)
+      expect(build(undefined, { compat: { forceAdaptiveThinking: false } }).models?.[0]?.compat)
+        .toEqual({ forceAdaptiveThinking: false })
+    })
+
+    it('does not infer adaptive thinking when the user disables reasoning', () => {
+      const model = build(undefined, { reasoningEfforts: false }).models?.[0]
+      expect(model?.reasoningEfforts).toBe(false)
+      expect(model).not.toHaveProperty('compat')
+    })
   })
 
   describe('reasoning-effort precedence (template > auto-fill)', () => {

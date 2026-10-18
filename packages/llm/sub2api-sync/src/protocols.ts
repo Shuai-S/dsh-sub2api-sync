@@ -181,9 +181,41 @@ export interface ProfileInput {
   defaultMaxTokens?: number
 }
 
+/**
+ * Native adaptive-thinking entries confirmed by pi-ai 1.1.0's Anthropic
+ * catalog. Keep this allowlist conservative: an effort enum alone is NOT proof
+ * of adaptive support (Opus 4.5 has native effort but still uses budget thinking,
+ * and aggregators publish effort enums even for older Claude models).
+ * Unknown releases/aliases stay explicit-template owned rather than guessed.
+ */
+const ADAPTIVE_CLAUDE_MODELS = new Set([
+  'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8',
+  'claude-opus-5', 'claude-opus-5-5',
+  'claude-sonnet-4-6', 'claude-sonnet-5', 'claude-sonnet-5-5',
+  'claude-haiku-5-5', 'claude-fable-5', 'claude-fable-5-1',
+])
+
+/** Pair catalog effort metadata with its native Anthropic wire mode. */
+function modelCompat(input: ProfileInput, model: ProfileModelInput): Record<string, unknown> | undefined {
+  const template = input.template?.compat
+  // Normalize only known spelling/variant suffixes, never arbitrary aliases or
+  // version prefixes (4-80 must not be mistaken for 4-8). Preserve the actual
+  // request model id: normalization is only for the capability lookup.
+  const canonicalId = model.id.toLowerCase().replaceAll('.', '-')
+    .replace(/(?:-(?:fast|think|thinking|\d{8})|@(?:default|eu))$/, '')
+  const adaptive = input.protocol === 'anthropic-messages'
+    && input.template?.reasoningEfforts !== false
+    && model.reasoningEfforts !== undefined
+    && ADAPTIVE_CLAUDE_MODELS.has(canonicalId)
+  if (!adaptive && template === undefined) return undefined
+  // This SDK switch emits native thinking.type=adaptive + output_config.effort;
+  // it does not bridge through OpenAI or convert the chosen effort to a budget.
+  // Merge field-by-field so explicit user values, including false, always win.
+  return { ...(adaptive ? { forceAdaptiveThinking: true } : {}), ...template }
+}
+
 /** Build one hand-declared llm-pi-ai provider profile for a group. */
 export function buildProviderProfile(input: ProfileInput): PiAiProviderProfile {
-  const compat = input.template?.compat
   // Reasoning-effort precedence: an explicit template (map or `false`) is the
   // user's decision and wins over the per-model auto-fill; only a template
   // without `reasoningEfforts` lets the models.dev-derived map through.
@@ -215,25 +247,28 @@ export function buildProviderProfile(input: ProfileInput): PiAiProviderProfile {
     apiKeyEnv: input.apiKeyEnv,
     api: input.protocol,
     baseURL: baseURLForProtocol(input.instance, input.protocol),
-    models: input.models.map((model) => ({
-      id: model.id,
-      // Display name for the model-catalog editor's 显示名称 column (the
-      // pi-ai entry's `name` field); absent leaves the id as the name.
-      ...(model.name !== undefined ? { name: model.name } : {}),
-      // Enrichment (C4) fills the capacity facts the gateway never reports;
-      // models without a match keep the route-level defaults below.
-      ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
-      ...(model.maxTokens !== undefined ? { maxTokens: model.maxTokens } : {}),
-      ...(model.imageInput === true ? { input: ['text', 'image'] as Array<'text' | 'image'> } : {}),
-      ...(compat !== undefined ? { compat: { ...compat } } : {}),
-      ...(reasoning === false
-        ? { reasoningEfforts: false }
-        : reasoning !== undefined
-          ? { reasoningEfforts: { ...reasoning } }
-          : model.reasoningEfforts !== undefined
-            ? { reasoningEfforts: { ...model.reasoningEfforts } }
-            : {}),
-    })),
+    models: input.models.map((model) => {
+      const compat = modelCompat(input, model)
+      return {
+        id: model.id,
+        // Display name for the model-catalog editor's 显示名称 column (the
+        // pi-ai entry's `name` field); absent leaves the id as the name.
+        ...(model.name !== undefined ? { name: model.name } : {}),
+        // Enrichment (C4) fills the capacity facts the gateway never reports;
+        // models without a match keep the route-level defaults below.
+        ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+        ...(model.maxTokens !== undefined ? { maxTokens: model.maxTokens } : {}),
+        ...(model.imageInput === true ? { input: ['text', 'image'] as Array<'text' | 'image'> } : {}),
+        ...(compat !== undefined ? { compat } : {}),
+        ...(reasoning === false
+          ? { reasoningEfforts: false }
+          : reasoning !== undefined
+            ? { reasoningEfforts: { ...reasoning } }
+            : model.reasoningEfforts !== undefined
+              ? { reasoningEfforts: { ...model.reasoningEfforts } }
+              : {}),
+      }
+    }),
     // Provider-level default effort (pi-ai `reasoning`) — the UI preselects
     // it and drops its "provider default" option once present.
     ...(input.template?.reasoning !== undefined ? { reasoning: input.template.reasoning } : {}),
