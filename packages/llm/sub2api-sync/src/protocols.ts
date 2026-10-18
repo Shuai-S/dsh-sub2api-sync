@@ -189,14 +189,26 @@ export function buildProviderProfile(input: ProfileInput): PiAiProviderProfile {
   // without `reasoningEfforts` lets the models.dev-derived map through.
   const reasoning = input.template?.reasoningEfforts
   // Retry policy: the built-in lenient proxied-upstream policy with the
-  // Config's per-section overrides merged over it (`backoff` merges deeply —
-  // a partial backoff override must not lose the other built-in delays).
+  // Config's per-section overrides merged over it, field by field. The merge
+  // must not spread the raw override: the resolved Config materializes the
+  // volatile `retryPolicy` object with EMPTY schema shapes (`retryableCodes:
+  // []`, `backoff: {}`) for users who never touched the YAML field, and
+  // spreading that would shadow the built-in values — an empty
+  // `retryableCodes` then fails llm-pi-ai's own validation
+  // (`retryPolicy.retryableCodes must not be empty`) on every sync. An
+  // absent-or-empty key inherits the built-in, matching the override contract.
   const override = input.retryPolicy ?? {}
   const retryPolicy: PiAiRetryPolicy = {
-    ...SUB2API_RETRY_POLICY,
-    ...override,
-    retryableCodes: [...(override.retryableCodes ?? SUB2API_RETRY_POLICY.retryableCodes)],
-    backoff: { ...SUB2API_RETRY_POLICY.backoff, ...override.backoff },
+    mode: override.mode ?? SUB2API_RETRY_POLICY.mode,
+    maxRetries: override.maxRetries ?? SUB2API_RETRY_POLICY.maxRetries,
+    retryableCodes: override.retryableCodes !== undefined && override.retryableCodes.length > 0
+      ? [...override.retryableCodes]
+      : [...SUB2API_RETRY_POLICY.retryableCodes],
+    backoff: {
+      initialDelayMs: override.backoff?.initialDelayMs ?? SUB2API_RETRY_POLICY.backoff.initialDelayMs,
+      maxDelayMs: override.backoff?.maxDelayMs ?? SUB2API_RETRY_POLICY.backoff.maxDelayMs,
+      jitterRatio: override.backoff?.jitterRatio ?? SUB2API_RETRY_POLICY.backoff.jitterRatio,
+    },
   }
   return {
     displayName: input.displayName.length > 0 ? input.displayName : `Group ${input.groupId}`,

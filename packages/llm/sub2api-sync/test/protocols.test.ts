@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { baseURLForProtocol, buildProviderProfile, guessPlatformFromModels, protocolForPlatform, renderProviderName, SUB2API_RETRY_POLICY } from '../src/protocols.ts'
+import type { Sub2apiSyncConfig } from '../src/config.ts'
 import { isOwnedRoute, legacyKeyIdOfRoute, legacyKeyRef, panelRefreshRef, panelTokenRef, parseGroupId, platformLabel, routeForKey, routeKeyRef, sha256Hex, suffixOfRoute } from '../src/types.ts'
 
 describe('platformLabel', () => {
@@ -92,6 +93,34 @@ describe('provider profile construction', () => {
     // Route-level model defaults ride the Config fields.
     expect(profile.defaultContextWindow).toBe(200000)
     expect(profile.defaultMaxTokens).toBe(16384)
+  })
+
+  it('inherits the built-in policy when the resolved Config materializes empty override shapes', async () => {
+    // The volatile `retryPolicy` config object resolves to a live cell whose
+    // value materializes the schema shape for users who never touched the
+    // YAML field: `retryableCodes: []`, `backoff: {}`. Spreading that raw
+    // override shadowed the built-in values and wrote an EMPTY
+    // `retryableCodes`, which llm-pi-ai rejects on every sync
+    // (`retryPolicy.retryableCodes must not be empty`).
+    const { Config } = await import('../src/config.ts')
+    const unwrap = <T,>(field: { get?(): T } | T | undefined): T | undefined =>
+      field !== undefined && field !== null && typeof field === 'object' && typeof (field as { get?(): T }).get === 'function'
+        ? (field as { get(): T }).get()
+        : field as T | undefined
+    const schema = Config as unknown as (input: Record<string, unknown>) => { retryPolicy?: { get(): Sub2apiSyncConfig['retryPolicy'] } }
+    const materialized = unwrap(schema({}).retryPolicy)
+    expect(materialized).toMatchObject({ retryableCodes: [], backoff: {} })
+    const profile = buildProviderProfile({
+      groupId: 7,
+      displayName: 'NexaRelay(Claude 拼车)',
+      protocol: 'anthropic-messages',
+      instance: 'https://gw.example.com',
+      apiKeyEnv: 'DSH_SUB2API_KEY_7',
+      models: [{ id: 'claude-x' }],
+      retryPolicy: materialized,
+    })
+    // The written profile carries the FULL built-in policy — never an empty code list.
+    expect(profile.retryPolicy).toEqual(SUB2API_RETRY_POLICY)
   })
 
   it('falls back the display name to the group id', () => {
