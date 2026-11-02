@@ -15,6 +15,7 @@ const zh = {
 
   localOnlyWarning: '当前页面进程本地，配置仅本页生效',
   configUnavailable: '配置暂不可用：宿主未连接或未暴露该设置条目',
+  routesUnreachableWarning: '动作路由不可达：当前连接可能经 DSH Remote 中继，或宿主半侧未就绪——登录、勾选与同步请回到电脑上的 DSH Web 操作',
 
   nameLine: 'sub2api · {instance}',
   nameLineSite: '{name} · {instance}',
@@ -144,6 +145,7 @@ const en = {
 
   localOnlyWarning: 'This page runs process-local; configuration applies to this page only',
   configUnavailable: 'Configuration is unavailable: the host is not connected or does not expose this entry',
+  routesUnreachableWarning: 'Action routes are unreachable: this connection may go through a DSH-Remote relay or the host half is not ready — sign in, select keys and sync from the desktop DSH Web',
 
   nameLine: 'sub2api · {instance}',
   nameLineSite: '{name} · {instance}',

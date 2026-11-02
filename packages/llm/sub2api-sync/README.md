@@ -119,6 +119,15 @@ For every declared group with a stored key, the engine:
 
 Routes take effect on the next request. The route suffix is a SHA-256 truncation over (instance baseURL, panel key id) — stable, collision-free across instances, and it deliberately carries no trace of the panel's sequential key numbering (a shared config screenshot reveals nothing about how many keys the site has issued). Entries only ever cover the `sub2api-<10-hex>` (current) and `sub2api-<digits>` (legacy, migrated on the next sync) shapes — the ownership boundary. Anything else in `llm-pi-ai.providers` (your hand-entered routes, other plugins' routes) is never touched. Keys that disappear from the selection lose their entry and their credential; the remote key itself is only revoked when `deleteOrphanKeys` is enabled. Each **registered-route row** in the sync card carries a **Remove** button — it deletes the local route and credential only (**no panel calls**, so it works even with an empty balance) and unchecks the key so the next sync cannot resurrect it; the report below stays a read-only hint of the last run. Logout, definitive auth loss, and instance switches purge the plugin's sync state site-wide — owned routes, relay-key credentials, and the last sync report go together (a report describing state that no longer exists must not keep rendering).
 
+## dsh-Go (Android) adaptation
+
+The plugin adapts to [DSH Go](https://github.com/ccch1mneyyy/dsh-Go)'s native settings capabilities (native protocol v1):
+
+- **Native settings page** (Settings › Plugins › Sub2API Sync): every field applies instantly (volatile) with bilingual descriptions; the engine-maintained `routeKeyIds` map is hidden natively and advanced groups (retry policy, model overrides) start collapsed; the **panel password** is a credential slot (`DSH_SUB2API_PANEL_PASSWORD`) — set it from the phone and both the web card and the native panel log in without retyping (the per-instance ref wins; this slot is the fallback);
+- **Native surfaces**: a composer strip (routes · last sync) and a **Sync status** panel (chat details › Plugins tab): sign-in state, instance, route list, and **Sync now / Sign in / Sign out** actions; long actions run in the background and refresh on settle, failures show in the panel's callout. Requires the dsh-go bridge on the host (bundled with dsh-Go's local engine; remote hosts usually lack it, and nothing shows over DSH Remote);
+- **Web island**: the full settings card works in dsh-Go's web mode. Over DSH Remote the plugin's action routes are not relayed — the card shows an "action routes unreachable" banner; sign in and sync from the desktop DSH Web instead;
+- Two-factor (TOTP) accounts finish only the first leg natively; complete the second leg in the web settings card.
+
 ## Model Experience
 
 - **Context blocks (short form)**: one provider per sub2api group, one relay key per provider, model catalog discovered from the instance; per-model `compat` inherits the user template. Reasoning efforts (`reasoningEfforts`) follow an explicit template when set (including `false`), and otherwise auto-fill per model from the models.dev enrichment.

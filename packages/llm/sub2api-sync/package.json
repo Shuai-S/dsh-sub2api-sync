@@ -67,6 +67,15 @@
       "platform": "web"
     }
   },
+  "dshGo": {
+    "v": 1,
+    "title": { "zh": "Sub2API 同步", "en": "Sub2API Sync" },
+    "icon": "chart",
+    "contributes": {
+      "composer.strip": [{ "id": "sync-strip", "icon": "chart", "panel": "sync-status" }],
+      "panels": [{ "id": "sync-status", "title": { "zh": "同步状态", "en": "Sync status" }, "icon": "chart", "placement": ["session.tab", "features"] }]
+    }
+  },
   "dependencies": {
     "@deepseek-ai/dsh-credentials": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "^3.18.4"

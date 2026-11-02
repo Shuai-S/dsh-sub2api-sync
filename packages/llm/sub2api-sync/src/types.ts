@@ -200,6 +200,14 @@ export function panelPasswordRef(baseURL: string): string {
   return `DSH_SUB2API_PASSWORD_${hashString(instanceKey(baseURL))}`
 }
 
+/**
+ * Fixed credential slot behind the dsh-Go native settings page: a password
+ * set on the phone lands here. The per-instance ref above remains the
+ * gateway's own storage for proven-good passwords; login resolution reads
+ * the instance ref first and this slot as the final fallback.
+ */
+export const NATIVE_PANEL_PASSWORD_REF = 'DSH_SUB2API_PANEL_PASSWORD' as const
+
 /** OAuth access-token credential reference for one instance (C2). */
 export function oauthTokenRef(baseURL: string): string {
   return `DSH_SUB2API_OAUTH_TOKEN_${hashString(instanceKey(baseURL))}`

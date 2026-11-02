@@ -26,7 +26,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import type { ModelTemplate, PiAiRetryPolicy } from './protocols.ts'
-import { DEFAULT_PROVIDER_NAME_TEMPLATE, type ApiProtocol } from './types.ts'
+import { DEFAULT_PROVIDER_NAME_TEMPLATE, NATIVE_PANEL_PASSWORD_REF, type ApiProtocol } from './types.ts'
 import { THINKING_LEVELS, type ThinkingLevel } from './protocols.ts'
 
 /** Per-section overrides over the plugin's built-in lenient retry policy
@@ -84,6 +84,16 @@ export interface Sub2apiSyncConfig {
   defaultMaxTokens?: number
   /** Escape hatch: allow action routes from private-network peers (§11). Default false. */
   allowRemoteActions?: boolean
+  /** dsh-Go native-settings credential slot for the panel password (fixed
+   * ref). The secret value itself lives in the credential store — the
+   * schema only carries the binding and a write-refusing sentinel. */
+  panelCredential?: {
+    /** Mirrors the schema's const projection — the slot ref is fixed. */
+    credentialRef?: typeof NATIVE_PANEL_PASSWORD_REF | null
+    /** Sentinel input side: the transform refuses any non-empty value, so
+     * this only ever carries the empty default in the config document. */
+    password?: any
+  }
 }
 
 const apiProtocolSchema = z.union([
@@ -92,19 +102,60 @@ const apiProtocolSchema = z.union([
   z.const('anthropic-messages'),
 ])
 
+/**
+ * dsh-Go native settings: a fixed-ref credential slot for the panel
+ * password (the official dsh-media shape). The `credential-ref` role marks
+ * the binding — the App reads it, shows 已设置/未设置 and writes the secret
+ * through its credentials transaction; the `secret` sentinel refuses any
+ * value on the ordinary config write path, so a password can never land in
+ * the profile document. Empty default keeps the form write a no-op.
+ */
+const secretSentinel = z
+  .transform(z.any(), (value) => {
+    if (value !== '') throw new Error('面板密码只能通过凭据服务写入（本字段仅作占位）。')
+    return ''
+  }, true)
+  .default('')
+  .role('secret')
+
+const panelCredentialSlot = z.object({
+  credentialRef: z.const(NATIVE_PANEL_PASSWORD_REF).default(NATIVE_PANEL_PASSWORD_REF).role('credential-ref'),
+  password: secretSentinel.description('面板密码（写入凭据库，手机原生设置可填） / Panel password (stored in the credential store)'),
+})
+  .description('面板密码凭据（免输登录用，与网页卡共用） / Panel password credential')
+  .collapse()
+
 // The output side is `any` deliberately: the factory's own mapped snapshot
 // types (deeply-readonly volatile snapshots through `NoInfer`) are not
 // expressible by a hand-written annotation, and nothing in this package
 // consumes `Config`'s output type — `ResolvedSub2apiSyncConfig` below is the
 // resolved runtime view `apply` uses.
 export const Config: z<Sub2apiSyncConfig, any> = z.object({
-  baseURL: z.string().volatile(),
-  email: z.string().volatile(),
-  providerNameTemplate: z.string().default(DEFAULT_PROVIDER_NAME_TEMPLATE).volatile(),
-  selectedKeys: z.array(z.number().step(1)).default([]).volatile(),
-  modelListOverrides: z.dict(z.array(z.string())).default({}).volatile(),
-  protocolOverrides: z.dict(apiProtocolSchema).default({}).volatile(),
-  routeKeyIds: z.dict(z.number().step(1)).default({}).volatile(),
+  baseURL: z.string()
+    .description('sub2api 实例地址（含或不含 /v1） / Instance URL (with or without /v1)')
+    .volatile(),
+  email: z.string()
+    .description('面板账号邮箱（密码登录用） / Panel account email (password login)')
+    .volatile(),
+  providerNameTemplate: z.string().default(DEFAULT_PROVIDER_NAME_TEMPLATE)
+    .description('供应商显示名模板，须含 {keyName} 或 {siteName} / Provider display-name template (must keep {keyName} or {siteName})')
+    .volatile(),
+  selectedKeys: z.array(z.number().step(1)).default([])
+    .description('待同步的中转 key 列表（网页卡勾选写入） / Relay keys selected for sync (card-managed)')
+    .collapse()
+    .volatile(),
+  modelListOverrides: z.dict(z.array(z.string())).default({})
+    .description('分组手动模型列表（/v1/models 不可用时） / Manual model lists when /v1/models is unavailable')
+    .collapse()
+    .volatile(),
+  protocolOverrides: z.dict(apiProtocolSchema).default({})
+    .description('分组线协议覆盖 / Per-group wire-protocol override')
+    .collapse()
+    .volatile(),
+  routeKeyIds: z.dict(z.number().step(1)).default({})
+    .description('（引擎维护，请勿手改）路由 → 面板 key id 映射 / Engine-maintained route→keyId map — do not edit')
+    .hidden(true)
+    .volatile(),
   compatTemplate: z.object({
     compat: z.dict(z.any()),
     reasoningEfforts: z.union([z.const(false), z.dict(z.union([z.string(), z.const(null)]))]),
@@ -112,12 +163,25 @@ export const Config: z<Sub2apiSyncConfig, any> = z.object({
       z.const('off'), z.const('minimal'), z.const('low'),
       z.const('medium'), z.const('high'), z.const('xhigh'), z.const('max'),
     ]),
-  }).volatile(),
-  enrichModelMeta: z.boolean().default(true).volatile(),
-  keyQuota: z.number().volatile(),
-  keyExpiresInDays: z.number().step(1).volatile(),
-  deleteOrphanKeys: z.boolean().default(false).volatile(),
-  syncIntervalMs: z.number().step(1).volatile(),
+  })
+    .description('同步模型继承的兼容模板 / Per-model template inherited by synced models')
+    .collapse()
+    .volatile(),
+  enrichModelMeta: z.boolean().default(true)
+    .description('models.dev 元数据增强（显示名/上下文窗口） / models.dev metadata enrichment')
+    .volatile(),
+  keyQuota: z.number()
+    .description('新建 key 的额度（USD，可选） / Optional quota (USD) for created keys')
+    .volatile(),
+  keyExpiresInDays: z.number().step(1)
+    .description('新建 key 的有效天数（可选） / Optional expiry in days for created keys')
+    .volatile(),
+  deleteOrphanKeys: z.boolean().default(false)
+    .description('移除路由时同时吊销面板 key / Also revoke the panel key when removing a route')
+    .volatile(),
+  syncIntervalMs: z.number().step(1)
+    .description('定时同步间隔 ms（删除字段即关闭，下限 60000） / Scheduled resync interval ms (unset = off; floor 60000)')
+    .volatile(),
   retryPolicy: z.object({
     mode: z.union([z.const('normal'), z.const('always')]),
     maxRetries: z.number().step(1),
@@ -127,10 +191,20 @@ export const Config: z<Sub2apiSyncConfig, any> = z.object({
       maxDelayMs: z.number(),
       jitterRatio: z.number(),
     }),
-  }).volatile(),
-  defaultContextWindow: z.number().step(1).volatile(),
-  defaultMaxTokens: z.number().step(1).volatile(),
-  allowRemoteActions: z.boolean().default(false).volatile(),
+  })
+    .description('同步路由的重试策略覆盖（缺省继承内置宽容策略） / Retry-policy overrides (defaults to the built-in lenient policy)')
+    .collapse()
+    .volatile(),
+  defaultContextWindow: z.number().step(1)
+    .description('元数据无法匹配时的默认上下文窗口 / Default context window when enrichment cannot match')
+    .volatile(),
+  defaultMaxTokens: z.number().step(1)
+    .description('元数据无法匹配时的默认最大输出 / Default max output tokens when enrichment cannot match')
+    .volatile(),
+  allowRemoteActions: z.boolean().default(false)
+    .description('允许私网对端调用动作路由（逃生门，默认关，开启有安全暴露） / Allow private-network peers on action routes (escape hatch, default off)')
+    .volatile(),
+  panelCredential: panelCredentialSlot.volatile(),
 })
 
 /** The default provider-name template — owned by `types.ts` (browser-safe), re-exported here. */

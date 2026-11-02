@@ -35,6 +35,7 @@ import {
   resetDiscoveryCache,
 } from './oauth.ts'
 import { PanelGateway, panelPasswordRef } from './panel.ts'
+import { registerDshGo } from './dshgo.ts'
 import {
   describeOwnedRoutes,
   registerRoutes,
@@ -45,7 +46,7 @@ import {
   type RouteDeps,
   type StatusRoute,
 } from './routes.ts'
-import { routeKeyRef, routeForKey, panelTokenRef, panelRefreshRef, oauthTokenRef, oauthRefreshRef, isOwnedRoute, mutateWithRetry } from './types.ts'
+import { routeKeyRef, routeForKey, panelTokenRef, panelRefreshRef, oauthTokenRef, oauthRefreshRef, isOwnedRoute, mutateWithRetry, NATIVE_PANEL_PASSWORD_REF } from './types.ts'
 import type { SettingsPathOp } from './types.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -205,7 +206,13 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
     authState: () => gateway.authState(source().email),
     login: async (email, password): Promise<LoginResponse> => {
       const typed = password !== undefined && password.length > 0 ? password : undefined
-      let pwd = typed ?? (await credentials.resolve(panelPasswordRef(instance())))?.value
+      // Resolution order: the typed password wins; then the per-instance ref
+      // the gateway persisted on earlier proven logins; then the fixed
+      // dsh-Go native slot (password set from the phone's settings page).
+      let pwd =
+        typed ??
+        (await credentials.resolve(panelPasswordRef(instance())))?.value ??
+        (await credentials.resolve(NATIVE_PANEL_PASSWORD_REF))?.value
       if (pwd === undefined || pwd.length === 0) {
         throw new Error('请输入面板密码（首次登录后密码会保存到凭据存储，之后可免输入）')
       }
@@ -450,6 +457,9 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
   }
 
   registerRoutes(ctx, deps)
+
+  // dsh-Go native surfaces (panel + strip): inert without the bridge.
+  registerDshGo(ctx, deps, { email: () => source().email })
 
   // Scheduled resync: armed from config, re-armed on every volatile commit.
   // The engine queue dedupes against explicit syncs (`isRunning` check).

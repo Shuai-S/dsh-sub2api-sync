@@ -71,9 +71,18 @@ dsh plugin --profile web add ./packages/llm/sub2api-sync
 3. 勾选好要用的 key（可多选、可跨分组），点「**同步所选（N）**」——引擎为**每一把勾选的 key 建一个供应商**，各自发现模型、按所属分组平台映射协议（anthropic → anthropic-messages，OpenAI 家族 → openai-responses，其余 → openai-completions，可按分组覆盖），写入 `llm-pi-ai.providers`；
 4. 模型选择器下一请求即可用。主卡下方的「同步」块也能触发一次全量同步并查看完整报告；报告的每个条目带「**移除**」按钮——只删本地路由与凭据（**不调面板**，余额不足也可用），并自动取消该 key 的勾选，下次同步不会复活；可选高级参数在 **插件页 → Sub2API Sync** 调参卡。
 
+## dsh-Go（Android）适配
+
+插件适配 [DSH Go](https://github.com/ccch1mneyyy/dsh-Go)（社区 Android 客户端）的原生设置能力（原生协议 v1）：
+
+- **原生设置页**（设置 › 插件 › Sub2API Sync）：全部字段即改即生效（volatile），附中英文说明；引擎内部字段（`routeKeyIds`）在原生页隐藏，重试策略等高级组默认折叠；**面板密码**是凭据槽字段（`DSH_SUB2API_PANEL_PASSWORD`）——手机上即可写入凭据库，之后网页卡与原生面板登录都免输密码（实例派生引用优先，本槽兜底）；
+- **原生界面**：输入框上方状态条（路由数 · 上次同步）与「同步状态」面板（对话详情 › 插件页签）：登录状态、实例、路由列表、**立即同步 / 登录 / 退出**动作；长动作后台执行、完成即刷新，失败原因显示在面板顶部提示条。需要主机带 dsh-go 桥接（dsh-Go 本机引擎自带；远程主机一般没有，经 DSH Remote 不显示）；
+- **网页岛**：完整设置卡在 dsh-Go 的网页版可用；经 DSH Remote 遥控电脑时动作路由不随中继转发——卡片顶部会出现「动作路由不可达」警示条，登录与同步请回到电脑上的 DSH Web；
+- 两步验证（TOTP）账号的原生登录只完成第一段，第二段请到网页版设置卡完成。
+
 ## 安全
 
-- 一切秘密（面板 token、密码、各 relay key）只进 harness 凭据存储（确定性引用 `DSH_SUB2API_TOKEN_<实例哈希>`、`DSH_SUB2API_KEY_<key-id>`、`DSH_SUB2API_PASSWORD_<实例哈希>`），不进 settings、不进日志、不进会话；
+- 一切秘密（面板 token、密码、各 relay key）只进 harness 凭据存储（确定性引用 `DSH_SUB2API_TOKEN_<实例哈希>`、`DSH_SUB2API_KEY_<key-id>`、`DSH_SUB2API_PASSWORD_<实例哈希>`、dsh-Go 原生设置槽 `DSH_SUB2API_PANEL_PASSWORD`），不进 settings、不进日志、不进会话；
 - `GET /keys` 只回 key 元数据（id/名称/分组/状态），**不回明文**；明文只用于引擎解析该 key 并即时写入凭据存储；
 - 宿主动作路由只接受回环同源请求；跨设备访问 web UI 时配置只读（平台 `memory` 模式），动作需在 `cordis.yml` 显式开启 `allowRemoteActions`（默认关闭）。
 

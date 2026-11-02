@@ -14,6 +14,16 @@ import { join } from 'node:path'
 const BUNDLE = join(import.meta.dirname, '../lib/client.js')
 
 describe('client bundle externals', () => {
+  it('stays within the web-boot size budget', { skip: !existsSync(BUNDLE) }, () => {
+    // The client half loads during the app's web boot (a historically fragile
+    // window on some profiles): keep the wrapped bundle lean. The cap leaves
+    // generous headroom over the current ~86 KiB while catching accidental
+    // heavy imports (data snapshots, polyfills, the schema runtime).
+    const LIMIT = 120 * 1024
+    const bytes = readFileSync(BUNDLE).byteLength
+    expect(bytes).toBeLessThanOrEqual(LIMIT)
+  })
+
   it('requests only baseline externals', { skip: !existsSync(BUNDLE) }, () => {
     const source = readFileSync(BUNDLE, 'utf8')
     const requires = [...source.matchAll(/\brequire\((["'])([^"']+)\1\)/g)].map((match) => match[2])

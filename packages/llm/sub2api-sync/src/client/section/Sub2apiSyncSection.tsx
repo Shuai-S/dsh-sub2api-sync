@@ -19,7 +19,7 @@ import { type Sub2apiSyncConfig } from '../../config.ts'
 import { ROUTES, type GroupsView, type StatusResponse, type StatusRoute } from '../../routes.ts'
 import type { SyncAction, SyncReport } from '../../engine.ts'
 import type { NS } from '../locales.ts'
-import { refreshStatus } from '../status.ts'
+import { refreshStatus, useStatusHealth } from '../status.ts'
 import { dropSelectedKey, pruneInvalidSelection, setField, useConfigForm } from '../useConfigForm.ts'
 import type { PluginApi } from '../usePluginApi.ts'
 import { PKG_NAME } from '../constants.ts'
@@ -78,6 +78,9 @@ function actionToneOf(action: SyncAction): 'success' | 'info' | 'outline' | 'dan
 /** @param props - owner/locale/injected shares (see {@link Sub2apiSyncSectionProps}). @returns the settings card. */
 export function Sub2apiSyncSection({ t, api, config, useStatus }: Sub2apiSyncSectionProps) {
   const status = useStatus((value: StatusResponse | undefined) => value) as StatusResponse | undefined
+  // Poller-side reachability of the plugin's action routes: false after two
+  // consecutive failed /status rounds (relay-forwarded sessions, stale host).
+  const routesReachable = useStatusHealth()
   const snapshot = useConfigForm(config)
   const configValues = snapshot.value
   const writable = snapshot.writable
@@ -282,6 +285,7 @@ export function Sub2apiSyncSection({ t, api, config, useStatus }: Sub2apiSyncSec
     <div className="s2s-section">
       {snapshot.status === 'ready' && !writable && <p className="s2s-warn">{t('localOnlyWarning')}</p>}
       {snapshot.status === 'unavailable' && <p className="s2s-warn">{t('configUnavailable')}</p>}
+      {!routesReachable && <p className="s2s-warn">{t('routesUnreachableWarning')}</p>}
 
       <section className="s2s-card">
         <div className="s2s-row">

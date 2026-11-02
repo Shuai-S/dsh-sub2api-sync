@@ -18,9 +18,23 @@ import { callJson } from './usePluginApi.ts'
 
 const POLL_MS = 5000
 
+/** Consecutive failed rounds before the card shows the unreachable banner. */
+const DEGRADED_AFTER = 2
+
 let snapshot: StatusResponse | undefined
 let timer: ReturnType<typeof setInterval> | undefined
 const listeners = new Set<() => void>()
+
+/** Reachability of the plugin's action routes, as observed by the poller. */
+let reachable = true
+let failures = 0
+const healthListeners = new Set<() => void>()
+
+function publishHealth(next: boolean): void {
+  if (next === reachable) return
+  reachable = next
+  for (const listener of healthListeners) listener()
+}
 
 function publish(next: StatusResponse | undefined): void {
   // Identical references stay silent: uSES relies on getSnapshot stability.
@@ -33,8 +47,16 @@ function publish(next: StatusResponse | undefined): void {
 async function poll(): Promise<void> {
   try {
     publish(await callJson<StatusResponse>(ROUTES.status))
+    failures = 0
+    publishHealth(true)
   } catch {
     // The next tick retries; stale data with the poller quiet beats a blank card.
+    // Two-plus consecutive failures mean the routes are really unreachable (a
+    // DSH-Remote relay cannot forward plugin HTTP routes; a stale host half
+    // answers 404 until the plugin reloads) — surface that instead of letting
+    // every login/sync click fail silently.
+    failures += 1
+    if (failures >= DEGRADED_AFTER) publishHealth(false)
   }
 }
 
@@ -65,6 +87,23 @@ export const statusSource: {
 /** Selector hook over the shared status snapshot (component-side twin). */
 export function useStatus(): StatusResponse | undefined {
   return useSyncExternalStore(subscribe, getSnapshot)
+}
+
+/** Reachability observable for the action routes (uSES-compatible face). */
+export const statusHealthSource: {
+  getSnapshot(): boolean
+  subscribe(fn: () => void): () => void
+} = {
+  getSnapshot: () => reachable,
+  subscribe(fn: () => void): () => void {
+    healthListeners.add(fn)
+    return () => { healthListeners.delete(fn) }
+  },
+}
+
+/** Selector hook over the reachability state (component-side twin). */
+export function useStatusHealth(): boolean {
+  return useSyncExternalStore(statusHealthSource.subscribe, statusHealthSource.getSnapshot)
 }
 
 function getSnapshot(): StatusResponse | undefined {

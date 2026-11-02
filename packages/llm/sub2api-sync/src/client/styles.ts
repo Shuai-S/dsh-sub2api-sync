@@ -453,6 +453,88 @@ const CSS = `
   font-size: 13px;
   line-height: 22px;
 }
+
+/* Mobile (dsh-Go web island / narrow windows): stack the row layouts, keep
+   interactive rows at Android's 44dp touch floor, and let the anchored group
+   panel clear the soft keyboard. The desktop spec above is untouched — every
+   rule here is scoped to the narrow viewport. */
+@media (max-width: 640px) {
+  .s2s-section {
+    gap: 12px;
+  }
+
+  .s2s-row,
+  .s2s-inline {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .s2s-actions {
+    justify-content: flex-start;
+  }
+
+  .s2s-actions .s2s-feedback {
+    white-space: normal;
+  }
+
+  .s2s-keyRow {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 44px;
+    padding: 8px 10px;
+  }
+
+  .s2s-keyRow > :last-child {
+    justify-self: start;
+    text-align: left;
+  }
+
+  .s2s-selectField,
+  .s2s-groupOption {
+    min-height: 44px;
+  }
+
+  .s2s-input,
+  .s2s-groupPicker {
+    flex-basis: 100%;
+  }
+
+  .s2s-searchInput {
+    width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .s2s-pager {
+    justify-content: center;
+  }
+
+  .s2s-footerStrip {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .s2s-reportRemove {
+    margin-left: 0;
+    align-self: flex-end;
+  }
+
+  /* Keyboard clearance: the fixed-position panel must not run under the
+     soft keyboard; dvh tracks the visual viewport on Android WebViews. */
+  .s2s-groupPanel {
+    max-height: 60dvh;
+  }
+}
+
+/* Notch and gesture-bar insets on standalone web islands. */
+@supports (padding: max(0px)) {
+  @media (max-width: 640px) {
+    .s2s-section {
+      padding-left: max(8px, env(safe-area-inset-left));
+      padding-right: max(8px, env(safe-area-inset-right));
+    }
+  }
+}
 `
 
 /** Inject the stylesheet once per document (idempotent across reloads). */
