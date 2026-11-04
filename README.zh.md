@@ -50,7 +50,7 @@ dsh plugin --profile web add github:Shuai-S/dsh-sub2api-sync#path:packages/llm/s
 
 ## 使用
 
-1. 在设置卡点**登录**，填实例地址（如 `https://cn.api.nexarelay.com`）+ 面板凭据（支持 TOTP；密码存入凭据存储，之后免输入）；
+1. 在设置卡（或插件详情页的连接卡）点**连接面板**，填实例地址（如 `https://cn.api.nexarelay.com`）+ 面板凭据（支持 TOTP；密码存入凭据存储，之后免输入）；
 2. **Keys 卡**列出实例的中继密钥——勾选一把或多把（可跨分组），也可就地新建 key；
 3. 点**同步所选（N）**——引擎为每把 key 建一个供应商，发现模型并写入 `llm-pi-ai.providers`；
 4. 模型下一请求即可用；同步报告支持逐条**移除**（只删本地路由与凭据，不调面板）。

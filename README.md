@@ -50,7 +50,7 @@ After installing, restart the app or toggle the plugin off/on; failed entries ar
 
 ## Usage
 
-1. Click **Login** in the settings card, enter the instance URL (e.g. `https://cn.api.nexarelay.com`) plus panel credentials (TOTP supported; the password is stored in the credential store).
+1. Click **Connect panel** in the settings card (or the detail page's connect card), enter the instance URL (e.g. `https://cn.api.nexarelay.com`) plus panel credentials (TOTP supported; the password is stored in the credential store).
 2. The **Keys** card lists the instance's relay keys — tick one or many (cross-group), or create a new key inline.
 3. Hit **Sync selected (N)** — the engine builds **one provider per key**, discovers models, and writes routes into `llm-pi-ai.providers`.
 4. Models become selectable on the next request; the sync report supports per-entry removal (local routes and credentials only, the panel is never called).

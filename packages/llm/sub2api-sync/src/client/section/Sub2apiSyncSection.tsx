@@ -320,7 +320,7 @@ export function Sub2apiSyncSection({ t, api, config, useStatus }: Sub2apiSyncSec
               </Button>
             ) : (
               <Button variant="primary" disabled={accountBusy} onClick={() => { setSignInOpen(true) }}>
-                {t('signIn')}
+                {t('connectPanel')}
               </Button>
             )}
           </div>

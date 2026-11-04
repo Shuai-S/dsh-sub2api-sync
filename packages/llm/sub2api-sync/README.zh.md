@@ -9,7 +9,7 @@
 - **登录通道**：面板密码+2FA（C3）已交付；网页授权（C2，OAuth 授权码 + PKCE）待 sub2api 侧部署后接入。PAT（C1）已随本插件移除——sub2api 上游从未部署对应端点，该通道无令牌来源；
 - **Keys 驱动同步**：Keys 卡列出面板已有 relay key（缺省全不选）→ **勾选多把**（可跨分组）→「同步所选」→ **一把 key 一个供应商**（路由 `sub2api-<10-hex>`，不含顺序 id）→ 模型下一请求即可用；需要新 key 用「创建 key」弹窗（默认与分组同名）；
 - **供应商命名**：`providerNameTemplate` 渲染，缺省 `{siteName}({keyName})`——即 `<站点名称>(<key 名>)`，站点名称来自实例探测；
-- **UI**：设置页顶级卡片（`settings.section`）+ 插件页调参卡（`plugins.bundle.config`），样式对齐 `ui-settings-account`，文案全双语（zh/en）；
+- **UI**：设置页顶级卡片（`settings.section`）+ 插件详情页连接卡与同步报告（`plugins.detail.section`）+ 插件页调参卡（`plugins.bundle.config`），样式对齐 `ui-settings-account`，文案全双语（zh/en）；
 - **数据缝**：配置读写走平台 `configForms`（字段级、revision 围栏、schema 校验）；宿主路由只承载动作/秘密/状态投影；
 - 指纹路由（旧 Mode B）与分组驱动同步（rev.5）均已退役——同步锚定真实面板 key id。
 
@@ -66,7 +66,7 @@ dsh plugin --profile web add ./packages/llm/sub2api-sync
 
 ## 使用
 
-1. 点「登录」，在弹窗里填**实例地址**（如 `https://cn.api.nexarelay.com`，可带 `/v1`）+ 凭据（面板邮箱/密码，TOTP 账号按提示输入一次性验证码；密码会存入凭据存储，之后免输入）；
+1. 点「连接面板」（设置卡或插件详情页的连接卡均可进入），在弹窗里填**实例地址**（如 `https://cn.api.nexarelay.com`，可带 `/v1`）+ 凭据（面板邮箱/密码，TOTP 账号按提示输入一次性验证码；密码会存入凭据存储，之后免输入）；
 2. **Keys 卡**列出该实例已有的 relay key（最新创建在前，首屏 5 条，底部「加载更多」翻页）。每一行前面的勾选框 = 选中用于同步；右上角「**创建 key**」弹窗可新建：选分组 → 名称默认与分组同名 → 创建即自动勾选；
 3. 勾选好要用的 key（可多选、可跨分组），点「**同步所选（N）**」——引擎为**每一把勾选的 key 建一个供应商**，各自发现模型、按所属分组平台映射协议（anthropic → anthropic-messages，OpenAI 家族 → openai-responses，其余 → openai-completions，可按分组覆盖），写入 `llm-pi-ai.providers`；
 4. 模型选择器下一请求即可用。主卡下方的「同步」块也能触发一次全量同步并查看完整报告；报告的每个条目带「**移除**」按钮——只删本地路由与凭据（**不调面板**，余额不足也可用），并自动取消该 key 的勾选，下次同步不会复活；可选高级参数在 **插件页 → Sub2API Sync** 调参卡。
@@ -117,6 +117,9 @@ dsh plugin --profile web add ./packages/llm/sub2api-sync
 - 推理档位自动填充只覆盖 models.dev 提供 `effort` 枚举的模型（OpenAI gpt-5 系/o3、GLM 5.x、Qwen3.8、DeepSeek V4 系等）；`toggle`/`budget_tokens` 型推理（旧版 Claude、Gemini、deepseek-v3.2、kimi-k2.x 等）的线上形态不是 effort 字符串，`reasoningEfforts` 无法表达，仍由模板/`compat` 管辖。
 - 用量查询（`GET /v1/usage`）是已决策的非目标。
 - 与社区插件 `GodD6366/dsh-sub2api` 同装：路由名不冲突（本插件 `sub2api-<10-hex>` 摘要形态），各自管理条目与凭据引用。
+- **面板 API 是私有前端契约**：无稳定性承诺；响应按必需字段校验，缺失即带上下文响亮失败。
+- **需要 `dsh-llm-pi-ai` 对重放的 assistant 消息计零用量**的 dsh 版本（多轮 pi-ai 崩溃已在当前 master / 0.1.2-rc.1 线修复）。
+- **针对真实 harness 组合的 REAL 组合/销毁/快照测试待补**：当前以单元测试 + 真机冒烟验证。
 
 ## 开发
 

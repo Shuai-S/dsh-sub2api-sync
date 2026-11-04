@@ -80,7 +80,7 @@ function DetailSectionBody({ t, api, config }: PropsLocale<typeof NS> & DetailIn
         <p className="s2s-hint">{t('detailConnectHint')}</p>
         <div className="s2s-actions">
           <Button variant="primary" disabled={!reachable} onClick={() => { setSignInOpen(true) }}>
-            {t('detailConnectButton')}
+            {t('connectPanel')}
           </Button>
         </div>
         {!reachable && <p className="s2s-warn">{t('routesUnreachableWarning')}</p>}

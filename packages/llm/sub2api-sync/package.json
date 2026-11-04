@@ -1,6 +1,6 @@
 {
   "name": "@mangoc/dsh-sub2api-sync",
-  "description": "Sync one sub2api instance's groups, keys, and models into dsh-llm-pi-ai provider routes: panel-driven login (password / OAuth), one relay key one provider.",
+  "description": "Sync one sub2api instance's groups, keys, and models into dsh-llm-pi-ai provider routes: panel-driven login (password / OAuth), one provider per relay key.",
   "version": "0.2.8",
   "license": "MIT",
   "author": "Shuai-S",
