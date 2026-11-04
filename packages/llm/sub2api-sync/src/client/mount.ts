@@ -24,7 +24,7 @@ import { statusSource } from './status.ts'
 import { ensureCss } from './styles.ts'
 import { createPluginApi } from './usePluginApi.ts'
 import { Sub2apiSyncSection, type SectionInjected } from './section/Sub2apiSyncSection.tsx'
-import { BundleConfigCard } from './bundleConfig/BundleConfigCard.tsx'
+import { BundleConfigCard, type BundleConfigInjected } from './bundleConfig/BundleConfigCard.tsx'
 import { ProviderBadge } from './models/ProviderBadge.tsx'
 import { ModelsFooter } from './models/ModelsFooter.tsx'
 import { DetailBadge, DetailSection, type DetailInjected } from './plugins/Detail.tsx'
@@ -51,10 +51,16 @@ export function mount(ctx: Context): void {
     inject: () => sectionOps,
   }, Sub2apiSyncSection))
 
+  // The host detail page renders this slot without a ConfigPageForm (its
+  // formFor only serves the row/item dialogs), so the card writes through
+  // the plugin's own config form — same settings store as the settings card.
+  const bundleConfigOps: BundleConfigInjected = { config }
+
   ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
     name: 'plugins.bundle.config',
     key: PKG_NAME,
     locale: NS,
+    inject: () => bundleConfigOps,
   }, BundleConfigCard))
 
   // U2 placements — status/provenance surfaces (§3), except the detail

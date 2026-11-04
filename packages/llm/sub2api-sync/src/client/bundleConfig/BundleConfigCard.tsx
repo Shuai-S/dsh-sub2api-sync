@@ -3,8 +3,17 @@
  * bundle's package name): the tuning fields — provider-name template, created
  * key quota/expiry, auto-sync interval, orphan-key revocation, metadata
  * enrichment, and the cross-device action escape hatch. Values read from the
- * owner-injected form snapshot and write through `form.mutate` path ops; the
- * card renders only on the bundle's own page (`view === 'page'`).
+ * plugin's own configuration form (the same `configForms` seam the settings
+ * card uses) and write through field-level `form.set`/`unset` calls; the card
+ * renders only on the bundle's own page (`view === 'page'`).
+ *
+ * The slot contract (dsh-client-ui-plugin-manager 0.2.0-rc.2) declares an
+ * optional host-owned `ConfigPageForm`, but the detail page renders this slot
+ * without one — its `formFor` only serves the row/item dialogs, so every card
+ * keyed to this slot sees `form === undefined` and a blank section shows. The
+ * card therefore writes through the plugin's own form, which shares the same
+ * settings store; if a later host revision starts passing `form`, migrating
+ * back to the contract path is a contained change.
  *
  * The slot contract rides the `@deepseek-ai/dsh-client-ui-plugin-manager`
  * client augmentation (pulled below). `protocolOverrides`/`compatTemplate`
@@ -15,16 +24,21 @@
 
 import { useEffect, useState } from 'react'
 import { Button, Input, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
-import type { ConfigPageForm } from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { Sub2apiSyncConfig } from '../../config.ts'
 import type { NS } from '../locales.ts'
-import type { ConfigPathOp } from '../useConfigForm.ts'
+import { setField, unsetField, useConfigForm, type ConfigPathOp } from '../useConfigForm.ts'
 
-/** Composed card props: owner/key share + locale seat. */
+/** Business face the mount injects into the bundle config card. */
+export interface BundleConfigInjected {
+  config: ConfigForm<Sub2apiSyncConfig>
+}
+
+/** Composed card props: owner/key share + locale seat + the plugin's own config form. */
 export type BundleConfigCardProps =
-  PropsRuntime<'plugins.bundle.config'> & PropsLocale<typeof NS>
+  PropsRuntime<'plugins.bundle.config'> & PropsLocale<typeof NS> & InjectFace<BundleConfigInjected>
 
 /** `''` marks "unset the field"; `'invalid'` marks a draft the field rejects. */
 type ParsedNumber = number | '' | 'invalid'
@@ -42,22 +56,37 @@ function messageOf(error: unknown): string {
 
 type Feedback = { tone: 'ok' | 'error'; text: string } | undefined
 
-/** @param props - owner and locale shares. @returns the page form, or null off-page. */
-export function BundleConfigCard({ view, form, t }: BundleConfigCardProps) {
-  if (view !== 'page' || form === undefined) return null
-  return <BundleConfigFields form={form} t={t} />
+/** @param props - owner/locale shares plus the injected config form. @returns the fields, or null off-page. */
+export function BundleConfigCard({ view, t, config }: BundleConfigCardProps) {
+  if (view !== 'page') return null
+  return <BundleConfigFields config={config} t={t} />
 }
 
-function BundleConfigFields({ form, t }: { form: ConfigPageForm; t: PropsLocale<typeof NS>['t'] }) {
-  const values = (form.state.value ?? {}) as Partial<Sub2apiSyncConfig>
-  const writable = form.state.writable
+function BundleConfigFields({ config, t }: { config: ConfigForm<Sub2apiSyncConfig>; t: PropsLocale<typeof NS>['t'] }) {
+  const snapshot = useConfigForm(config)
+  const values = (snapshot.value ?? {}) as Partial<Sub2apiSyncConfig>
+  const writable = snapshot.writable
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<Feedback>(undefined)
 
+  // Field-level writes over the plugin's own config form. Every op this card
+  // produces addresses a top-level field, so the path-op list maps 1:1 onto
+  // sequential form.set/unset calls; the first refusal aborts the batch.
   const run = (ops: readonly ConfigPathOp[]): void => {
     setBusy(true)
     setFeedback(undefined)
-    form.mutate(ops)
+    const apply = async (): Promise<boolean> => {
+      for (const op of ops) {
+        const field = op.path[0]
+        if (field === undefined || field === '') return false
+        const accepted = op.op === 'set'
+          ? await setField(config, field, op.value)
+          : await unsetField(config, field)
+        if (!accepted) return false
+      }
+      return true
+    }
+    apply()
       .then((accepted) => {
         setFeedback(accepted ? { tone: 'ok', text: t('savedNotice') } : { tone: 'error', text: t('writeRefused') })
       })
