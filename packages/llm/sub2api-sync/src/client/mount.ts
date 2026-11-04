@@ -27,7 +27,7 @@ import { Sub2apiSyncSection, type SectionInjected } from './section/Sub2apiSyncS
 import { BundleConfigCard } from './bundleConfig/BundleConfigCard.tsx'
 import { ProviderBadge } from './models/ProviderBadge.tsx'
 import { ModelsFooter } from './models/ModelsFooter.tsx'
-import { DetailBadge, DetailSection } from './plugins/Detail.tsx'
+import { DetailBadge, DetailSection, type DetailInjected } from './plugins/Detail.tsx'
 import { ActivationGuide } from './plugins/ActivationGuide.tsx'
 
 /** Register dictionaries and slot contributions on the client context. */
@@ -57,7 +57,8 @@ export function mount(ctx: Context): void {
     locale: NS,
   }, BundleConfigCard))
 
-  // U2 placements — all read-only status/provenance surfaces (§3).
+  // U2 placements — status/provenance surfaces (§3), except the detail
+  // section below, which carries the signed-out connect entry.
   ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
     name: 'settings.models.provider-card',
     key: 'llm-pi-ai',
@@ -77,10 +78,21 @@ export function mount(ctx: Context): void {
     locale: NS,
   }, DetailBadge))
 
+  // The detail section is the one U2 placement with a write surface: while
+  // the panel is signed out it offers the settings section's SignInDialog in
+  // place (the activation guide's "open configuration" lands here and
+  // `pluginNavigation` has no settings-page route), so it shares the same
+  // api/config face the settings card uses.
+  const detailOps: DetailInjected = {
+    api: sectionOps.api,
+    config,
+  }
+
   ctx.slots.inject('plugins.detail.section', () => ctx.slots.register({
     name: 'plugins.detail.section',
     id: 'sub2api-sync',
     locale: NS,
+    inject: () => detailOps,
   }, DetailSection))
 
   const activationOps = {

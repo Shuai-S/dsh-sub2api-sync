@@ -55,6 +55,15 @@ export function footerModel(status: StatusResponse | undefined): FooterModel {
   }
 }
 
+/**
+ * Which card the Plugins-page detail section renders for a status snapshot:
+ * `connect` while the panel is signed out (or unknown — the poller may not
+ * have answered yet), `report` once signed in.
+ */
+export function detailCardModel(status: StatusResponse | undefined): 'connect' | 'report' {
+  return status?.auth?.signedIn === true ? 'report' : 'connect'
+}
+
 /** Coarse relative time for the footer line: just now / N minutes ago. */
 export function relativeMinutes(at: number, now: number): { key: 'footerJustNow' | 'footerMinutesAgo'; count?: number } {
   const minutes = Math.max(0, Math.floor((now - at) / 60000))
