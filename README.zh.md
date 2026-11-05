@@ -44,8 +44,6 @@ dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/release
 dsh plugin --profile web add github:Shuai-S/dsh-sub2api-sync#path:packages/llm/sub2api-sync
 ```
 
-> 仓库处于私有状态时，两条 GitHub 渠道需要仓库访问权限。
-
 装好后重启应用、或在插件页把开关关掉再打开；失败的条目不会自动重试。
 
 ## 使用

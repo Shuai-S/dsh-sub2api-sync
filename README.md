@@ -44,8 +44,6 @@ dsh plugin --profile web add https://github.com/Shuai-S/dsh-sub2api-sync/release
 dsh plugin --profile web add github:Shuai-S/dsh-sub2api-sync#path:packages/llm/sub2api-sync
 ```
 
-> While this repository is private, the two GitHub channels require repository access.
-
 After installing, restart the app or toggle the plugin off/on; failed entries are not retried automatically.
 
 ## Usage
