@@ -468,6 +468,20 @@ export class Sub2apiSyncEngine {
       models = await this.discoverModels(config, group.id, instance, plaintext)
     }
 
+    // An empty discovery is a gateway-side condition — the relay exposes no
+    // models to this key (an empty `data` array, or entries the tolerant
+    // reader cannot interpret). It must fail THIS key alone: writing
+    // `models: []` gets the whole llm-pi-ai commit rejected by the route
+    // validation ("resolves no models; the installed catalog does not
+    // describe this route…"), which aborts every other key's sync and hides
+    // the faulty key behind core's cryptic message.
+    if (models.length === 0) {
+      const groupLabel = group.name.length > 0 ? `${group.name}（#${group.id}）` : `#${group.id}`
+      throw new Sub2apiSyncError(
+        `key #${key.id}（${key.name}）经网关 /v1/models 发现到 0 个模型（分组 ${groupLabel}）——中转站没有向这把 key 暴露任何模型；请在中转站确认该分组的模型配置与这把 key 的权限，或在卡片用「模型清单覆盖」显式指定模型。这把 key 已跳过，其余 key 照常同步`,
+      )
+    }
+
     // Keep the credential in step only after a proven-good discovery: a
     // failed sync must not persist an unvalidated (possibly wrong) value.
     if (this.credentials.resolve !== undefined) {

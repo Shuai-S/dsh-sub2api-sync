@@ -330,6 +330,31 @@ describe('Sub2apiSyncEngine.sync', () => {
     expect(report.entries[0].error).toContain('没有协议映射')
   })
 
+  it('fails only the key whose discovery returns no models; the others still sync', async () => {
+    const emptyGroup = { ...structuredClone(CLAUDE_GROUP), id: 2, name: '空模型分组' }
+    const keys = [
+      { id: 5, name: 'Claude 拼车', groupId: 1, key: 'sk-5' },
+      { id: 6, name: '空模型', groupId: 2, key: 'sk-6' },
+    ]
+    // Discovery runs in selection order: key 5 gets models, key 6 gets none.
+    const { fetchImpl } = fetchScripted([
+      { status: 200, payload: { data: [{ id: 'claude-x' }] } },
+      { status: 200, payload: { data: [] } },
+    ])
+    const { engine, settings } = makeEngine({
+      fetchImpl,
+      gateway: new FakeGateway([structuredClone(CLAUDE_GROUP), emptyGroup], keys),
+    })
+    const report = await engine.sync(config({ selectedKeys: [5, 6] }))
+    const route6 = routeForKey(INSTANCE, 6)
+    const failed = report.entries.find((entry) => entry.route === route6)
+    expect(failed).toMatchObject({ action: 'failed', keyId: 6 })
+    expect(failed?.error).toContain('0 个模型')
+    expect(report.entries.find((entry) => entry.route === ROUTE)).toMatchObject({ action: 'created', models: 1 })
+    expect(settings.providers[ROUTE]).toBeDefined()
+    expect(settings.providers[route6]).toBeUndefined()
+  })
+
   it('migrates plaintext from the legacy key-id ref when the panel masks the row', async () => {
     const { engine, settings, credentials } = makeEngine({
       fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }] }),
