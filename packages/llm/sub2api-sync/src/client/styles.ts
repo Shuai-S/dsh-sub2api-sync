@@ -96,13 +96,20 @@ const CSS = `
   border-top: 0.5px solid var(--dsw-alias-border-l2);
 }
 
+/* flex: 1 1 auto is load-bearing: a shrink-to-fit (flex: none) WRAPPING flex
+   container sizes itself by its largest item's contribution, not the sum of
+   items, so an input+save pair inside sized .s2s-actions to the input alone
+   and pushed the button onto a second right-aligned line (the stacked
+   config-field rows). Filling the row keeps one line on desktop; the wrap
+   below still degrades gracefully when the row itself runs out of space. */
 .s2s-actions {
   display: flex;
   justify-content: flex-end;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  flex: none;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* The account-balance pill in the identity header's action row. */

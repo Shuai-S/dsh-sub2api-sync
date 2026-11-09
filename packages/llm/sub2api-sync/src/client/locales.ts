@@ -96,8 +96,8 @@ const zh = {
   bundleDeleteOrphanHint: '仅对记录过 keyId 的分组生效',
   bundleEnrichLabel: '补全模型元数据',
   bundleEnrichHint: '同步时按模型 id 从 models.dev 补全容量元数据；关闭则仅用内置快照（离线）',
-  bundleAllowRemoteLabel: '允许私网设备调用动作路由',
-  bundleAllowRemoteWarning: '开启后同源或私网页面可改写模型路由与凭据——仅在可信内网开启',
+  bundleAllowRemoteLabel: '允许局域网内其他设备操作面板',
+  bundleAllowRemoteWarning: '开启后，同一局域网里的设备无需在本机登录，也能修改模型路由和登录信息——请只在家中等可信网络开启',
   bundleAdvancedHint: 'protocolOverrides / compatTemplate 高级字段请编辑 cordis.patch.yml',
 
   badgeManagedTag: 'Sub2API 同步',
@@ -229,8 +229,8 @@ const en = {
   bundleDeleteOrphanHint: 'Only affects groups whose keyId was recorded',
   bundleEnrichLabel: 'Enrich model metadata',
   bundleEnrichHint: 'Fill per-model capacity facts from models.dev at sync; off = bundled snapshot only (offline)',
-  bundleAllowRemoteLabel: 'Allow private-network devices to call action routes',
-  bundleAllowRemoteWarning: 'When enabled, same-origin or private-network pages can rewrite model routes and credentials — enable only on a trusted network',
+  bundleAllowRemoteLabel: 'Allow other devices on this network to use the panel',
+  bundleAllowRemoteWarning: 'When enabled, any device on the same network can change model routes and sign-in details — turn on only on networks you trust (such as home)',
   bundleAdvancedHint: 'Edit cordis.patch.yml for the advanced protocolOverrides / compatTemplate fields',
 
   badgeManagedTag: 'Sub2API Sync',

@@ -202,7 +202,7 @@ export const Config: z<Sub2apiSyncConfig, any> = z.object({
     .description('元数据无法匹配时的默认最大输出 / Default max output tokens when enrichment cannot match')
     .volatile(),
   allowRemoteActions: z.boolean().default(false)
-    .description('允许私网对端调用动作路由（逃生门，默认关，开启有安全暴露） / Allow private-network peers on action routes (escape hatch, default off)')
+    .description('允许局域网内其他设备操作面板（默认关；开启后同一局域网的设备可修改模型路由与登录信息，仅限可信内网） / Let other devices on your local network operate the panel (default off — they could change model routes and sign-in details; trusted networks only)')
     .volatile(),
   panelCredential: panelCredentialSlot.volatile(),
 })
