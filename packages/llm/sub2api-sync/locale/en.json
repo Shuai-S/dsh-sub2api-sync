@@ -1,6 +1,7 @@
 {
   "meta": {
     "title": "Sub2API Sync",
-    "description": "Sync one sub2api instance's groups, keys, and models into dsh-llm-pi-ai provider routes: panel-driven login (password / OAuth), one relay key one provider."
+    "description": "Sync a sub2api instance's groups, keys, and models into dsh provider routes: pick relay keys on the panel, one key becomes one provider, models usable on the next request. Naming, protocol mapping, and scheduled resync are tuned on the plugin page. Requires a reachable sub2api instance and panel account.",
+    "detail": "docs/DETAIL.md"
   }
 }

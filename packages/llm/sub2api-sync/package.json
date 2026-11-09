@@ -39,6 +39,8 @@
     "lib",
     "data",
     "locale",
+    "docs",
+    "icon.svg",
     "cordis.patch.yml",
     "README.md",
     "README.zh.md"
@@ -69,11 +71,33 @@
   },
   "dshGo": {
     "v": 1,
-    "title": { "zh": "Sub2API 同步", "en": "Sub2API Sync" },
+    "title": {
+      "zh": "Sub2API 同步",
+      "en": "Sub2API Sync"
+    },
     "icon": "chart",
     "contributes": {
-      "composer.strip": [{ "id": "sync-strip", "icon": "chart", "panel": "sync-status" }],
-      "panels": [{ "id": "sync-status", "title": { "zh": "同步状态", "en": "Sync status" }, "icon": "chart", "placement": ["session.tab", "features"] }]
+      "composer.strip": [
+        {
+          "id": "sync-strip",
+          "icon": "chart",
+          "panel": "sync-status"
+        }
+      ],
+      "panels": [
+        {
+          "id": "sync-status",
+          "title": {
+            "zh": "同步状态",
+            "en": "Sync status"
+          },
+          "icon": "chart",
+          "placement": [
+            "session.tab",
+            "features"
+          ]
+        }
+      ]
     }
   },
   "dependencies": {
@@ -129,5 +153,6 @@
     "tsdown": "^0.4.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.4"
-  }
+  },
+  "icon": "./icon.svg"
 }

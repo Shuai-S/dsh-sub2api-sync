@@ -1,0 +1,10 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="7" y="7" width="22" height="22" rx="4" fill="url(#s2s-sync-card)" fill-opacity="0.85" />
+  <path d="M23.1 12.9a6.1 6.1 0 0 0-10.6 1.5" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" />
+  <path d="M11.3 11.5v3.4h3.4" stroke="#FFFFFF" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M12.9 23.1a6.1 6.1 0 0 0 10.6-1.5" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" />
+  <path d="M24.7 24.5v-3.4h-3.4" stroke="#FFFFFF" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+  <defs>
+    <linearGradient id="s2s-sync-card" x1="18" y1="7" x2="18" y2="29" gradientUnits="userSpaceOnUse"><stop stop-color="#69B9FF" /><stop offset="1" stop-color="#324DE2" /></linearGradient>
+  </defs>
+</svg>
