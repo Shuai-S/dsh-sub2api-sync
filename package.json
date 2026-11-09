@@ -1,5 +1,5 @@
 {
-  "name": "sub2api-provider-sync",
+  "name": "dsh-sub2api-sync",
   "description": "DSH plugin that syncs a sub2api instance's relay keys and models into dsh-llm-pi-ai provider routes — one relay key, one provider.",
   "private": true,
   "version": "0.0.0",
