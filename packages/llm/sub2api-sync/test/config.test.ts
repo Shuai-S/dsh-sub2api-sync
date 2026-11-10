@@ -56,4 +56,17 @@ describe('validateConfig', () => {
     expect(() => validateConfig({ ...base(), defaultMaxTokens: -5 })).toThrowError(/defaultMaxTokens/)
     expect(() => validateConfig({ ...base(), defaultContextWindow: 200000, defaultMaxTokens: 16384 })).not.toThrow()
   })
+
+  it('accepts absent, empty and well-formed oauthCallbackOrigin overrides', () => {
+    expect(() => validateConfig({ ...base(), oauthCallbackOrigin: undefined })).not.toThrow()
+    expect(() => validateConfig({ ...base(), oauthCallbackOrigin: '' })).not.toThrow()
+    expect(() => validateConfig({ ...base(), oauthCallbackOrigin: 'http://192.168.1.10:3079' })).not.toThrow()
+    expect(() => validateConfig({ ...base(), oauthCallbackOrigin: 'https://sub.example.com' })).not.toThrow()
+  })
+
+  it('rejects malformed oauthCallbackOrigin overrides', () => {
+    expect(() => validateConfig({ ...base(), oauthCallbackOrigin: 'ftp://x' })).toThrowError(/oauthCallbackOrigin/)
+    expect(() => validateConfig({ ...base(), oauthCallbackOrigin: 'http://x:1/path' })).toThrowError(/oauthCallbackOrigin/)
+    expect(() => validateConfig({ ...base(), oauthCallbackOrigin: 'not a url' })).toThrowError(/oauthCallbackOrigin/)
+  })
 })

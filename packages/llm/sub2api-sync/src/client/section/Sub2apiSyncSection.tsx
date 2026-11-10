@@ -382,7 +382,7 @@ export function Sub2apiSyncSection({ t, api, config, useStatus }: Sub2apiSyncSec
         {signedIn && <SyncReportView t={t} report={report} />}
       </section>
 
-      <SignInDialog open={signInOpen} onClose={() => { setSignInOpen(false) }} api={api} config={config} baseURL={configuredBaseURL} writable={writable} onSignedIn={onSignedIn} t={t} />
+      <SignInDialog open={signInOpen} onClose={() => { setSignInOpen(false) }} api={api} config={config} baseURL={configuredBaseURL} writable={writable} routesReachable={routesReachable} onSignedIn={onSignedIn} t={t} />
     </div>
   )
 }

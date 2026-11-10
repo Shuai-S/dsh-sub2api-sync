@@ -109,7 +109,15 @@ export function createPluginApi(): PluginApi {
     )),
     removeKey: (keyId) => callJson<{ ok: true }>(ROUTES.removeKey, post({ keyId })),
     sync: (keyIds) => callJson<SyncResponse>(ROUTES.sync, post(keyIds !== undefined ? { keyIds } : undefined)),
-    oauthStart: () => callJson<OAuthStartResponse>(ROUTES.oauthStart, post()),
+    oauthStart: () => {
+      // The browser declares where the GUI actually loads from: the OAuth
+      // callback must come back to THIS origin, which the Host header cannot
+      // reveal behind rewriting reverse proxies (e.g. the NAS proxy port).
+      // Read via globalThis so the file also type-checks in the server
+      // program (no DOM lib there); undefined outside a browser.
+      const origin = (globalThis as unknown as { location?: { origin?: string } }).location?.origin
+      return callJson<OAuthStartResponse>(ROUTES.oauthStart, post(origin === undefined ? undefined : { origin }))
+    },
     oauthProbe: (address) =>
       callJson<OAuthProbeResponse>(`${ROUTES.oauthProbe}?address=${encodeURIComponent(address)}`),
     oauthStatus: (attemptId) =>

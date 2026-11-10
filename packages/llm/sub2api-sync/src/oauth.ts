@@ -13,9 +13,11 @@
  * - one-shot authorization attempts: `state` is single-use and expires with
  *   the attempt, the verifier never leaves the host process, and the final
  *   token exchange always re-submits the exact redirect_uri + verifier;
- * - loopback-only redirect derivation: the receiver is this harness's
-   * webserver, so the origin must be 127.0.0.1 / [::1] (RFC 8252 §7.3 —
- *   the port may vary, the path is the plugin's fixed callback route).
+ * - redirect origin resolution per attempt: config override > the
+ *   browser-declared client origin (loopback or private-network IP
+ *   literals only) > the request's Host-derived origin (strict loopback,
+ *   RFC 8252 §7.3 — the port may vary); the path is always the plugin's
+ *   fixed callback route.
  *
  * @module sub2api-sync/oauth
  */
@@ -180,7 +182,9 @@ export async function createPkcePair(): Promise<{ verifier: string; challenge: s
   return { verifier, challenge }
 }
 
-/** The exact loopback redirect URI for this harness session, or a loud reason. */
+/** The strict loopback-only fallback: the exact redirect URI for direct
+ * desktop access (or a proxy that faithfully passes the loopback Host),
+ * or a loud reason why this origin cannot host the callback. */
 export function loopbackCallbackOrigin(origin: string): string {
   let parsed: URL
   try {
@@ -196,6 +200,96 @@ export function loopbackCallbackOrigin(origin: string): string {
     )
   }
   return `${parsed.protocol}//${parsed.host}${OAUTH_CALLBACK_PATH}`
+}
+
+/** A well-formed http(s) origin (no path/query/hash), or null. */
+function tryAsOrigin(value: string): URL | null {
+  let parsed: URL
+  try {
+    parsed = new URL(value.trim())
+  } catch {
+    return null
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+  if ((parsed.pathname !== '/' && parsed.pathname !== '') || parsed.search || parsed.hash) return null
+  return parsed
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === '::1' || host === '[::1]'
+}
+
+/** RFC 1918 IPv4 ranges and IPv6 ULA (fc00::/7) — the LANs a home NAS serves. */
+function isPrivateHost(host: string): boolean {
+  const bare = host.replace(/^\[|\]$/g, '').toLowerCase()
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare)) return true
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(bare)) return true
+  if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(bare)) return true
+  if ((bare.startsWith('fc') || bare.startsWith('fd')) && /^[\da-f:]+$/.test(bare) && bare.includes(':')) return true
+  return false
+}
+
+/** The callback URL for an already-validated origin. */
+function callbackUrlOf(parsed: URL): string {
+  return `${parsed.protocol}//${parsed.host}${OAUTH_CALLBACK_PATH}`
+}
+
+/** Inputs for {@link resolveCallbackOrigin}. */
+export interface CallbackOriginInput {
+  /** `oauthCallbackOrigin` config override — wins whenever it is set. */
+  override?: unknown
+  /** The browser half's own `location.origin`, sent with the start request. */
+  clientOrigin?: unknown
+  /** Origin derived from the incoming request's Host header (proxy-blind). */
+  requestOrigin: string
+}
+
+/**
+ * Decide the redirect origin for one authorization attempt, highest
+ * priority first:
+ *
+ * 1. `override` — the `oauthCallbackOrigin` config field, a deliberate
+ *    escape hatch for self-hosted domains / HTTPS reverse proxies; any
+ *    well-formed http(s) origin is accepted.
+ * 2. `clientOrigin` — where the browser half actually loads the GUI from.
+ *    Accepted only for loopback and private-network IP literals: a crafted
+ *    page cannot steer the callback onto a hostname it likes, and public
+ *    deployments must opt in via the explicit override.
+ * 3. `requestOrigin` — derived from the request's Host header and validated
+ *    by the strict loopback rule; covers direct desktop access and SSH
+ *    tunnels, and stays honest when a rewriting proxy blinds the host.
+ *
+ * Safety: the provider uses PKCE S256 with one-shot `state`, so an
+ * authorization code alone is worthless to an attacker — widening the
+ * accepted origins adds no code-theft surface as long as every origin is
+ * one the user's browser actually reaches and that lands on this
+ * webserver's callback route.
+ */
+export function resolveCallbackOrigin(input: CallbackOriginInput): string {
+  const override = typeof input.override === 'string' ? input.override.trim() : ''
+  if (override.length > 0) {
+    const parsed = tryAsOrigin(override)
+    if (parsed === null) {
+      throw new OAuthError('invalid_request', `oauthCallbackOrigin 配置不是合法的 http(s) origin（不能带路径或查询串）：${override}`)
+    }
+    return callbackUrlOf(parsed)
+  }
+  const declared = typeof input.clientOrigin === 'string' ? input.clientOrigin.trim() : ''
+  if (declared.length > 0) {
+    const parsed = tryAsOrigin(declared)
+    if (parsed !== null) {
+      if (isLoopbackHost(parsed.hostname) || isPrivateHost(parsed.hostname)) {
+        return callbackUrlOf(parsed)
+      }
+      throw new OAuthError(
+        'invalid_request',
+        `OAuth 回调 origin 仅接受回环或私网 IP 直连入口，当前是 ${parsed.host} —— 若经自建域名或 HTTPS 反代访问，请在插件设置 oauthCallbackOrigin 里显式填写回调地址`,
+      )
+    }
+    // A malformed declaration is ignored: fall through so the request-origin
+    // fallback keeps its strict loopback guard and nothing widens by accident.
+  }
+  return loopbackCallbackOrigin(input.requestOrigin)
 }
 
 export function buildAuthorizeUrl(

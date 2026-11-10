@@ -91,6 +91,7 @@ function DetailSectionBody({ t, api, config }: PropsLocale<typeof NS> & DetailIn
           config={config}
           baseURL={snapshot.value?.baseURL}
           writable={snapshot.writable}
+          routesReachable={reachable}
           onSignedIn={() => { void refreshStatus() }}
           t={t}
         />

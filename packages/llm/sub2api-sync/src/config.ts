@@ -84,6 +84,10 @@ export interface Sub2apiSyncConfig {
   defaultMaxTokens?: number
   /** Escape hatch: allow action routes from private-network peers (§11). Default false. */
   allowRemoteActions?: boolean
+  /** Explicit OAuth callback origin override for self-hosted domains /
+   * HTTPS reverse proxies that rewrite the Host header. Empty = auto
+   * (client-declared origin > request Host, loopback-guarded). */
+  oauthCallbackOrigin?: string
   /** dsh-Go native-settings credential slot for the panel password (fixed
    * ref). The secret value itself lives in the credential store — the
    * schema only carries the binding and a write-refusing sentinel. */
@@ -204,6 +208,9 @@ export const Config: z<Sub2apiSyncConfig, any> = z.object({
   allowRemoteActions: z.boolean().default(false)
     .description('允许局域网内其他设备操作面板（默认关；开启后同一局域网的设备可修改模型路由与登录信息，仅限可信内网） / Let other devices on your local network operate the panel (default off — they could change model routes and sign-in details; trusted networks only)')
     .volatile(),
+  oauthCallbackOrigin: z.string()
+    .description('网页授权回调地址覆盖（留空自动；经自建域名/HTTPS 反代访问时填浏览器可达的 origin，如 http://192.168.1.10:3079） / OAuth callback origin override (empty = auto; set the browser-reachable origin, e.g. http://192.168.1.10:3079, when accessing via a self-hosted domain or an HTTPS reverse proxy)')
+    .volatile(),
   panelCredential: panelCredentialSlot.volatile(),
 })
 
@@ -252,6 +259,19 @@ export function readConfig(config: ResolvedSub2apiSyncConfig): Sub2apiSyncConfig
 export function validateConfig(config: Sub2apiSyncConfig): void {
   if (config.baseURL !== undefined && config.baseURL.length > 0 && !/^https?:\/\//i.test(config.baseURL.trim())) {
     throw new Error('sub2api-sync: baseURL 必须以 http(s):// 开头')
+  }
+  const callbackOverride = config.oauthCallbackOrigin
+  if (callbackOverride !== undefined && callbackOverride.trim().length > 0) {
+    let callbackOk = false
+    try {
+      const parsed = new URL(callbackOverride.trim())
+      callbackOk = (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+        && (parsed.pathname === '/' || parsed.pathname === '')
+        && !parsed.search && !parsed.hash
+    } catch {}
+    if (!callbackOk) {
+      throw new Error('sub2api-sync: oauthCallbackOrigin 必须是合法的 http(s) origin（不能带路径或查询串），如 http://192.168.1.10:3079')
+    }
   }
   const compat = config.compatTemplate
   if (compat?.reasoning !== undefined && !THINKING_LEVELS.includes(compat.reasoning as ThinkingLevel)) {

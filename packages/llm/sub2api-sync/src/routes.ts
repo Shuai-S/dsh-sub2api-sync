@@ -342,8 +342,11 @@ export interface RouteDeps {
   ownedRoutes(): StatusRoute[]
   /** Whether the cross-device escape hatch is on (Config, default false). */
   allowRemote(): boolean
-  /** Begin one OAuth authorization attempt bound to this harness origin. */
-  oauthStart(callbackOrigin: string): Promise<{ attemptId: string; authorizeUrl: string }>
+  /** Begin one OAuth authorization attempt. `requestOrigin` comes from the
+   * request's Host header (proxy-blind); `clientOrigin` is the browser half's
+   * declared `location.origin` (absent from older clients) — the host half
+   * resolves the callback origin from both plus its config override. */
+  oauthStart(requestOrigin: string, clientOrigin?: unknown): Promise<{ attemptId: string; authorizeUrl: string }>
   /** Whether the given instance address publishes OAuth discovery metadata
    * (host-side fetch — the browser cannot probe cross-origin). */
   oauthProbe(address: string): Promise<boolean>
@@ -592,7 +595,8 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
       if (!guard(req, res)) return
       if (!method('POST', req, res)) return
       try {
-        const started = await deps.oauthStart(requestOrigin(req))
+        const body = await readJson(req) as { origin?: unknown }
+        const started = await deps.oauthStart(requestOrigin(req), body.origin)
         json(res, 200, { ok: true, attemptId: started.attemptId, authorizeUrl: started.authorizeUrl } satisfies OAuthStartResponse)
       } catch (error) {
         json(res, 400, { ok: false, error: safeMessage(error) })

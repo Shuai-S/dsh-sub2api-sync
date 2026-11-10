@@ -30,9 +30,9 @@ import {
   createPkcePair,
   discoverOAuthEndpoints,
   exchangeAuthorizationCode,
-  loopbackCallbackOrigin,
   oauthScopesFor,
   resetDiscoveryCache,
+  resolveCallbackOrigin,
 } from './oauth.ts'
 import { PanelGateway, panelPasswordRef } from './panel.ts'
 import { registerDshGo } from './dshgo.ts'
@@ -379,12 +379,20 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
         return false
       }
     },
-    oauthStart: async (callbackOrigin) => {
+    oauthStart: async (requestOrigin, clientOrigin) => {
       const instanceValue = instance()
       if (!/^https?:\/\//i.test(instanceValue)) {
         throw new Error('请先填写 sub2api 实例地址，再发起网页授权')
       }
-      const redirectUri = loopbackCallbackOrigin(callbackOrigin)
+      // Layered resolution: config override > the browser's own declared
+      // origin > the request's Host-derived origin (strict loopback). The
+      // middle layer is what makes OAuth work through entry points the Host
+      // header cannot see (rewriting reverse proxies, LAN IP access).
+      const redirectUri = resolveCallbackOrigin({
+        requestOrigin,
+        clientOrigin,
+        override: source().oauthCallbackOrigin,
+      })
       const endpoints = await discoverOAuthEndpoints(instanceValue)
       const { verifier, challenge } = await createPkcePair()
       const attempt = oauthAttempts.create({ verifier, redirectUri, scope: oauthScopesFor(source().deleteOrphanKeys) })

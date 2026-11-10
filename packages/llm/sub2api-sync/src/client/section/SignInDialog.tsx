@@ -35,6 +35,12 @@ export interface SignInDialogProps extends PropsLocale<typeof NS> {
   baseURL: string | undefined
   /** Whether configuration writes are accepted (process-local mode read-only). */
   writable: boolean
+  /** Whether the action routes are reachable from this page (status health).
+   * Unreachable entries (DSH-Remote relay, portal shells that never forward
+   * plugin routes) cannot host the OAuth callback — the web channel is
+   * disabled honestly instead of stranding a browser tab on a dead redirect.
+   * Defaults to true for mounts that do not track health. */
+  routesReachable?: boolean
   /** Called after a successful sign-in (password/2FA or web authorization). */
   onSignedIn: () => void
 }
@@ -45,7 +51,7 @@ export interface SignInDialogProps extends PropsLocale<typeof NS> {
  * - C2 web authorization (`POST /oauth/start` → provider consent tab →
  *   `GET /oauth/callback`; this dialog polls `GET /oauth/status`).
  */
-export function SignInDialog({ open, onClose, api, config, baseURL, writable, onSignedIn, t }: SignInDialogProps) {
+export function SignInDialog({ open, onClose, api, config, baseURL, writable, routesReachable = true, onSignedIn, t }: SignInDialogProps) {
   const [phase, setPhase] = useState<SignInPhase>('password')
   const [channel, setChannel] = useState<SignInChannel>('password')
   const [address, setAddress] = useState('')
@@ -89,14 +95,14 @@ export function SignInDialog({ open, onClose, api, config, baseURL, writable, on
     const timer = setTimeout(() => {
       void api.oauthProbe(value).then((answer) => {
         if (channelTouchedRef.current) return
-        const next: SignInChannel = answer.supported ? 'oauth' : 'password'
+        const next: SignInChannel = answer.supported && routesReachable ? 'oauth' : 'password'
         setChannel(next)
         setPhase((prev) => (prev === 'password' || prev === 'oauth' ? next : prev))
       }).catch(() => undefined)
     }, 600)
     return () => { clearTimeout(timer) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [address, open, phase])
+  }, [address, open, phase, routesReachable])
 
   // The pending phase polls the host attempt; every other phase stops it.
   useEffect(() => {
@@ -226,7 +232,7 @@ export function SignInDialog({ open, onClose, api, config, baseURL, writable, on
         </Button>
       )}
       {phase === 'oauth' && (
-        <Button variant="primary" disabled={busy || address.trim().length === 0} onClick={startOauth}>
+        <Button variant="primary" disabled={busy || address.trim().length === 0 || !routesReachable} onClick={startOauth}>
           {t('oauthStart')}
         </Button>
       )}
@@ -284,7 +290,7 @@ export function SignInDialog({ open, onClose, api, config, baseURL, writable, on
           </>
         )}
         {phase === 'oauth' && (
-          <span className="s2s-hint">{t('oauthReadyHint')}</span>
+          <span className="s2s-hint">{routesReachable ? t('oauthReadyHint') : t('oauthUnreachableHint')}</span>
         )}
         {phase === 'oauth-pending' && (
           <div className="s2s-column">
