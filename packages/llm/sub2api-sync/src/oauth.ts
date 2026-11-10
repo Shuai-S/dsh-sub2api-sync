@@ -2,9 +2,12 @@
  * OAuth 2.1 Authorization Code + PKCE (S256) client for the sub2api provider.
  *
  * Implements the plugin-side half of the 2026-10-01 design:
- * - endpoint discovery from `/.well-known/oauth-authorization-server`
- *   (RFC 8414) with the `/api/v1/oauth/.well-known` compatibility alias as
- *   the fallback — discovery failure means OAuth is unavailable;
+ * - endpoint discovery per RFC 8414: the metadata URL is derived by inserting
+ *   `/.well-known/oauth-authorization-server` between the host and the
+ *   provider issuer path (§3), the document's `issuer` field must match the
+ *   expected provider issuer exactly (§3.3), and the deployed host-root
+ *   registration plus the `/api/v1/oauth/.well-known` compatibility alias
+ *   serve as gated fallbacks — discovery failure means OAuth is unavailable;
  * - PKCE: 64-char base64url verifier, S256 challenge only (never `plain`);
  * - one-shot authorization attempts: `state` is single-use and expires with
  *   the attempt, the verifier never leaves the host process, and the final
@@ -68,10 +71,28 @@ function absoluteHttpUrl(value: unknown): string | undefined {
   }
 }
 
+/** The provider issuer path under the instance root; the sub2api provider
+ * issues `issuer = {instance}/api/v1/oauth` (no trailing slash). Every
+ * discovery URL below is derived from this value, never guessed. */
+const PROVIDER_ISSUER_PATH = '/api/v1/oauth'
+
+/** One probe of the discovery ladder: its URL plus whether the document is
+ * required to carry an `issuer` field at all (legacy shapes may omit it). */
+interface DiscoveryCandidate {
+  url: string
+  requireIssuerField: boolean
+}
+
 /**
- * Resolve the provider metadata: the standard RFC 8414 location first, the
- * versioned compatibility alias second. A failed or incomplete document is a
- * loud failure — the caller hides the OAuth channel instead of guessing URLs.
+ * Resolve the provider metadata per RFC 8414. The strict §3 location (the
+ * metadata URL derived from the provider issuer) is tried first and must echo
+ * the expected issuer (§3.3 — issuer field required); the deployed host-root
+ * registration and the versioned compatibility alias follow as gated
+ * fallbacks. Issuer validation is what keeps a complete document served by a
+ * *different* authorization server (e.g. the upstream MCP issuer at the host
+ * root after route B) from being adopted just because it parses. A failed or
+ * incomplete hunt is a loud failure — the caller hides the OAuth channel
+ * instead of guessing URLs.
  */
 export async function discoverOAuthEndpoints(
   instance: string,
@@ -85,21 +106,46 @@ export async function discoverOAuthEndpoints(
     throw new OAuthError('discovery_failed', 'sub2api OAuth 发现失败（此前已失败，稍后重试）')
   }
   const base = instance.trim().replace(/\/+$/, '')
-  const candidates = [`${base}/.well-known/oauth-authorization-server`, `${base}/api/v1/oauth/.well-known`]
+  const expectedIssuer = `${base}${PROVIDER_ISSUER_PATH}`
+  // 1. Strict RFC 8414 §3 derivation — the document must carry the issuer
+  //    field (REQUIRED per §3.2) and it must match.
+  // 2. Host root — the deployed provider registration today; the upstream MCP
+  //    semantics under route B. Issuer validation is the only discriminator.
+  // 3. Versioned alias — the documented DSH compatibility path; its v1 shape
+  //    may omit the issuer field, so absence is tolerated here only.
+  const candidates: DiscoveryCandidate[] = [
+    { url: `${base}/.well-known/oauth-authorization-server${PROVIDER_ISSUER_PATH}`, requireIssuerField: true },
+    { url: `${base}/.well-known/oauth-authorization-server`, requireIssuerField: false },
+    { url: `${expectedIssuer}/.well-known`, requireIssuerField: false },
+  ]
   let endpoints: OAuthEndpoints | undefined
   let lastError = ''
   for (const candidate of candidates) {
     try {
-      const response = await fetchImpl(candidate, { headers: { accept: 'application/json' } })
+      const response = await fetchImpl(candidate.url, { headers: { accept: 'application/json' } })
       if (!response.ok) {
-        lastError = `HTTP ${response.status} at ${candidate}`
+        lastError = `HTTP ${response.status} at ${candidate.url}`
         continue
       }
       const payload = (await response.json()) as Record<string, unknown>
+      // RFC 8414 §3.3: the metadata issuer must be identical to the expected
+      // value. A document that names another authorization server is skipped,
+      // never adopted; a missing field is tolerated only where the legacy
+      // compat shape allows it (requireIssuerField === false).
+      const documentIssuer = typeof payload.issuer === 'string' ? payload.issuer : undefined
+      if (documentIssuer === undefined) {
+        if (candidate.requireIssuerField) {
+          lastError = `metadata at ${candidate.url} omits the required issuer field`
+          continue
+        }
+      } else if (documentIssuer !== expectedIssuer) {
+        lastError = `issuer mismatch at ${candidate.url}: ${documentIssuer} (expected ${expectedIssuer})`
+        continue
+      }
       const authorizationEndpoint = absoluteHttpUrl(payload.authorization_endpoint)
       const tokenEndpoint = absoluteHttpUrl(payload.token_endpoint)
       if (authorizationEndpoint === undefined || tokenEndpoint === undefined) {
-        lastError = `incomplete metadata at ${candidate}`
+        lastError = `incomplete metadata at ${candidate.url}`
         continue
       }
       const revocationEndpoint = absoluteHttpUrl(payload.revocation_endpoint)
@@ -110,7 +156,7 @@ export async function discoverOAuthEndpoints(
       }
       break
     } catch (error) {
-      lastError = `${candidate}: ${error instanceof Error ? error.message : String(error)}`
+      lastError = `${candidate.url}: ${error instanceof Error ? error.message : String(error)}`
     }
   }
   discoveryCache.set(key, { endpoints, fetchedAt: now })
