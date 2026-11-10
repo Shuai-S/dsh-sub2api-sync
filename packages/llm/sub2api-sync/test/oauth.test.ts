@@ -1,6 +1,6 @@
 /**
  * Unit coverage for the OAuth web channel (C2): PKCE shape, attempt
- * lifecycle, discovery fallback, loopback redirect policy, and the token
+ * lifecycle, strict discovery, loopback redirect policy, and the token
  * leg's wire contract. Everything runs against injected fakes — no network.
  *
  * @module sub2api-sync/test/oauth
@@ -97,8 +97,6 @@ describe('OAuthAttemptStore', () => {
 
 describe('discoverOAuthEndpoints', () => {
   const STRICT = 'http://panel:9000/.well-known/oauth-authorization-server/api/v1/oauth'
-  const HOST_ROOT = 'http://panel:9000/.well-known/oauth-authorization-server'
-  const ALIAS = 'http://panel:9000/api/v1/oauth/.well-known'
   const PROVIDER_ISSUER = 'http://panel:9000/api/v1/oauth'
 
   /** A conforming provider metadata document; fields are overridden per test. */
@@ -112,7 +110,7 @@ describe('discoverOAuthEndpoints', () => {
     }
   }
 
-  /** A discovery ladder keyed by probe URL; unlisted URLs answer 404. */
+  /** A single-probe fetch keyed by URL; unlisted URLs answer 404. */
   function ladder(handlers: Record<string, (url: string) => Response>) {
     const calls: string[] = []
     const fetchImpl = (async (input: string | URL | Request) => {
@@ -132,69 +130,61 @@ describe('discoverOAuthEndpoints', () => {
     expect(endpoints).toEqual(ENDPOINTS)
   })
 
-  it('falls back to the host root when the strict location 404s', async () => {
-    const { calls, fetchImpl } = ladder({ [HOST_ROOT]: () => jsonResponse(200, metadata()) })
+  it('normalizes a trailing slash on the instance before deriving the URL', async () => {
+    const { calls, fetchImpl } = ladder({ [STRICT]: () => jsonResponse(200, metadata()) })
     const endpoints = await discoverOAuthEndpoints('http://panel:9000/', fetchImpl)
-    expect(calls).toEqual([STRICT, HOST_ROOT])
+    expect(calls).toEqual([STRICT])
     expect(endpoints).toEqual(ENDPOINTS)
   })
 
-  it('accepts a legacy document without an issuer field on the compat candidates', async () => {
-    const doc = {
-      authorization_endpoint: 'http://panel:9000/api/v1/oauth/authorize',
-      token_endpoint: 'http://panel:9000/api/v1/oauth/token',
-    }
-    const { fetchImpl } = ladder({ [HOST_ROOT]: () => jsonResponse(200, doc) })
+  it('omits the optional revocation endpoint when the document lacks it', async () => {
+    const doc = metadata()
+    delete doc.revocation_endpoint
+    const { fetchImpl } = ladder({ [STRICT]: () => jsonResponse(200, doc) })
     const endpoints = await discoverOAuthEndpoints('http://panel:9000', fetchImpl)
     expect(endpoints.authorizationEndpoint).toBe('http://panel:9000/api/v1/oauth/authorize')
+    expect(endpoints.tokenEndpoint).toBe('http://panel:9000/api/v1/oauth/token')
     expect(endpoints.revocationEndpoint).toBeUndefined()
   })
 
-  it('skips host-root metadata from a different authorization server (route-B MCP guard)', async () => {
-    // Strict 404; the host root serves a complete document naming the upstream
-    // MCP issuer — a parseable document alone must never be adopted. The
-    // legacy alias doc (issuer omitted) wins instead.
+  it('rejects a mismatched issuer (route-B MCP guard) and caches the failure', async () => {
+    // The strict document names a different authorization server (e.g. the
+    // upstream MCP issuer at the host root on misconfigured relays) — a
+    // parseable document alone must never be adopted.
     const { calls, fetchImpl } = ladder({
-      [HOST_ROOT]: () => jsonResponse(200, metadata({ issuer: 'http://panel:9000/' })),
-      [ALIAS]: () =>
-        jsonResponse(200, {
-          authorization_endpoint: 'http://panel:9000/api/v1/oauth/authorize',
-          token_endpoint: 'http://panel:9000/api/v1/oauth/token',
-        }),
-    })
-    const endpoints = await discoverOAuthEndpoints('http://panel:9000', fetchImpl)
-    expect(calls).toEqual([STRICT, HOST_ROOT, ALIAS])
-    expect(endpoints.authorizationEndpoint).toBe('http://panel:9000/api/v1/oauth/authorize')
-    expect(endpoints.revocationEndpoint).toBeUndefined()
-  })
-
-  it('requires the issuer field at the strict RFC 8414 location', async () => {
-    const bare = metadata()
-    delete bare.issuer
-    const { calls, fetchImpl } = ladder({
-      [STRICT]: () => jsonResponse(200, bare),
-      [HOST_ROOT]: () => jsonResponse(200, metadata()),
-    })
-    const endpoints = await discoverOAuthEndpoints('http://panel:9000', fetchImpl)
-    expect(calls).toEqual([STRICT, HOST_ROOT])
-    expect(endpoints).toEqual(ENDPOINTS)
-  })
-
-  it('rejects a mismatched issuer even on the alias, and caches the failure', async () => {
-    const { calls, fetchImpl } = ladder({
-      [ALIAS]: () => jsonResponse(200, metadata({ issuer: 'http://elsewhere:9000/api/v1/oauth' })),
+      [STRICT]: () => jsonResponse(200, metadata({ issuer: 'http://panel:9000/' })),
     })
     await expect(discoverOAuthEndpoints('http://panel:9000', fetchImpl)).rejects.toThrowError(/issuer mismatch/)
     // The failure is cached for the TTL — the next call fails without I/O.
     await expect(discoverOAuthEndpoints('http://panel:9000', fetchImpl)).rejects.toThrowError(OAuthError)
-    expect(calls).toEqual([STRICT, HOST_ROOT, ALIAS])
+    expect(calls).toEqual([STRICT])
   })
 
-  it('fails loud when every location 404s', async () => {
+  it('requires the issuer field at the strict location (REQUIRED per §3.2)', async () => {
+    const bare = metadata()
+    delete bare.issuer
+    const { calls, fetchImpl } = ladder({ [STRICT]: () => jsonResponse(200, bare) })
+    await expect(discoverOAuthEndpoints('http://panel:9000', fetchImpl)).rejects.toThrowError(
+      /omits the required issuer field/,
+    )
+    expect(calls).toEqual([STRICT])
+  })
+
+  it('fails loud on a non-JSON body (SPA fallback page), naming the probed URL', async () => {
+    const { calls, fetchImpl } = ladder({
+      [STRICT]: () => new Response('<!doctype html><html lang="zh-CN"></html>', { status: 200, headers: { 'content-type': 'text/html' } }),
+    })
+    await expect(discoverOAuthEndpoints('http://panel:9000', fetchImpl)).rejects.toThrowError(
+      /metadata at http:\/\/panel:9000\/\.well-known\/oauth-authorization-server\/api\/v1\/oauth is not JSON/,
+    )
+    expect(calls).toEqual([STRICT])
+  })
+
+  it('fails loud when the strict location 404s — no fallback probes', async () => {
     const { calls, fetchImpl } = ladder({})
-    await expect(discoverOAuthEndpoints('http://panel:9000', fetchImpl)).rejects.toThrowError(OAuthError)
-    await expect(discoverOAuthEndpoints('http://panel:9000', fetchImpl)).rejects.toThrowError(OAuthError)
-    expect(calls).toEqual([STRICT, HOST_ROOT, ALIAS])
+    await expect(discoverOAuthEndpoints('http://panel:9000', fetchImpl)).rejects.toThrowError(/HTTP 404/)
+    await expect(discoverOAuthEndpoints('http://panel:9000', fetchImpl)).rejects.toThrowError(/此前已失败/)
+    expect(calls).toEqual([STRICT])
   })
 })
 

@@ -4,10 +4,11 @@
  * Implements the plugin-side half of the 2026-10-01 design:
  * - endpoint discovery per RFC 8414: the metadata URL is derived by inserting
  *   `/.well-known/oauth-authorization-server` between the host and the
- *   provider issuer path (§3), the document's `issuer` field must match the
- *   expected provider issuer exactly (§3.3), and the deployed host-root
- *   registration plus the `/api/v1/oauth/.well-known` compatibility alias
- *   serve as gated fallbacks — discovery failure means OAuth is unavailable;
+ *   provider issuer path (§3), and the document's `issuer` field must match
+ *   the expected provider issuer exactly (§3.3) — a single strict location
+ *   with no fallbacks (the host-root endpoint belongs to the upstream MCP
+ *   server and the legacy alias is gone); discovery failure means OAuth is
+ *   unavailable;
  * - PKCE: 64-char base64url verifier, S256 challenge only (never `plain`);
  * - one-shot authorization attempts: `state` is single-use and expires with
  *   the attempt, the verifier never leaves the host process, and the final
@@ -72,27 +73,20 @@ function absoluteHttpUrl(value: unknown): string | undefined {
 }
 
 /** The provider issuer path under the instance root; the sub2api provider
- * issues `issuer = {instance}/api/v1/oauth` (no trailing slash). Every
- * discovery URL below is derived from this value, never guessed. */
+ * issues `issuer = {instance}/api/v1/oauth` (no trailing slash). The discovery
+ * URL is derived from this value, never guessed. */
 const PROVIDER_ISSUER_PATH = '/api/v1/oauth'
 
-/** One probe of the discovery ladder: its URL plus whether the document is
- * required to carry an `issuer` field at all (legacy shapes may omit it). */
-interface DiscoveryCandidate {
-  url: string
-  requireIssuerField: boolean
-}
-
 /**
- * Resolve the provider metadata per RFC 8414. The strict §3 location (the
- * metadata URL derived from the provider issuer) is tried first and must echo
- * the expected issuer (§3.3 — issuer field required); the deployed host-root
- * registration and the versioned compatibility alias follow as gated
- * fallbacks. Issuer validation is what keeps a complete document served by a
- * *different* authorization server (e.g. the upstream MCP issuer at the host
- * root after route B) from being adopted just because it parses. A failed or
- * incomplete hunt is a loud failure — the caller hides the OAuth channel
- * instead of guessing URLs.
+ * Resolve the provider metadata per RFC 8414. Exactly one location is probed:
+ * the strict §3 derivation from the provider issuer, and the document must
+ * carry an `issuer` field (REQUIRED per §3.2) identical to the expected
+ * provider issuer (§3.3). The former host-root and legacy-alias fallbacks were
+ * removed by decision (2026-11-10): the host-root endpoint on real deployments
+ * belongs to the upstream MCP authorization server (live probes answer "MCP is
+ * disabled" or name a different issuer), and the compatibility alias is no
+ * longer deployed. A failed probe is a loud failure — the caller hides the
+ * OAuth channel instead of guessing URLs.
  */
 export async function discoverOAuthEndpoints(
   instance: string,
@@ -107,63 +101,60 @@ export async function discoverOAuthEndpoints(
   }
   const base = instance.trim().replace(/\/+$/, '')
   const expectedIssuer = `${base}${PROVIDER_ISSUER_PATH}`
-  // 1. Strict RFC 8414 §3 derivation — the document must carry the issuer
-  //    field (REQUIRED per §3.2) and it must match.
-  // 2. Host root — the deployed provider registration today; the upstream MCP
-  //    semantics under route B. Issuer validation is the only discriminator.
-  // 3. Versioned alias — the documented DSH compatibility path; its v1 shape
-  //    may omit the issuer field, so absence is tolerated here only.
-  const candidates: DiscoveryCandidate[] = [
-    { url: `${base}/.well-known/oauth-authorization-server${PROVIDER_ISSUER_PATH}`, requireIssuerField: true },
-    { url: `${base}/.well-known/oauth-authorization-server`, requireIssuerField: false },
-    { url: `${expectedIssuer}/.well-known`, requireIssuerField: false },
-  ]
+  const metadataUrl = `${base}/.well-known/oauth-authorization-server${PROVIDER_ISSUER_PATH}`
   let endpoints: OAuthEndpoints | undefined
   let lastError = ''
-  for (const candidate of candidates) {
-    try {
-      const response = await fetchImpl(candidate.url, { headers: { accept: 'application/json' } })
-      if (!response.ok) {
-        lastError = `HTTP ${response.status} at ${candidate.url}`
-        continue
-      }
-      const payload = (await response.json()) as Record<string, unknown>
-      // RFC 8414 §3.3: the metadata issuer must be identical to the expected
-      // value. A document that names another authorization server is skipped,
-      // never adopted; a missing field is tolerated only where the legacy
-      // compat shape allows it (requireIssuerField === false).
-      const documentIssuer = typeof payload.issuer === 'string' ? payload.issuer : undefined
-      if (documentIssuer === undefined) {
-        if (candidate.requireIssuerField) {
-          lastError = `metadata at ${candidate.url} omits the required issuer field`
-          continue
-        }
-      } else if (documentIssuer !== expectedIssuer) {
-        lastError = `issuer mismatch at ${candidate.url}: ${documentIssuer} (expected ${expectedIssuer})`
-        continue
-      }
-      const authorizationEndpoint = absoluteHttpUrl(payload.authorization_endpoint)
-      const tokenEndpoint = absoluteHttpUrl(payload.token_endpoint)
-      if (authorizationEndpoint === undefined || tokenEndpoint === undefined) {
-        lastError = `incomplete metadata at ${candidate.url}`
-        continue
-      }
-      const revocationEndpoint = absoluteHttpUrl(payload.revocation_endpoint)
-      endpoints = {
-        authorizationEndpoint,
-        tokenEndpoint,
-        ...(revocationEndpoint !== undefined ? { revocationEndpoint } : {}),
-      }
-      break
-    } catch (error) {
-      lastError = `${candidate.url}: ${error instanceof Error ? error.message : String(error)}`
-    }
+  try {
+    endpoints = await fetchStrictMetadata(metadataUrl, expectedIssuer, fetchImpl)
+  } catch (error) {
+    lastError = error instanceof Error ? error.message : String(error)
   }
   discoveryCache.set(key, { endpoints, fetchedAt: now })
   if (endpoints === undefined) {
     throw new OAuthError('discovery_failed', `sub2api OAuth 发现失败：${lastError}`)
   }
   return endpoints
+}
+
+/** One strict RFC 8414 §3 probe: fetch the metadata document at the derived
+ * URL and validate it, or throw a plain Error carrying the failure reason. */
+async function fetchStrictMetadata(
+  metadataUrl: string,
+  expectedIssuer: string,
+  fetchImpl: typeof fetch,
+): Promise<OAuthEndpoints> {
+  const response = await fetchImpl(metadataUrl, { headers: { accept: 'application/json' } })
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} at ${metadataUrl}`)
+  }
+  let payload: Record<string, unknown>
+  try {
+    payload = (await response.json()) as Record<string, unknown>
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(`metadata at ${metadataUrl} is not JSON: ${reason}`)
+  }
+  // RFC 8414 §3.3: the metadata issuer must be identical to the expected
+  // value — a document that names another authorization server is rejected,
+  // never adopted; the field itself is REQUIRED per §3.2.
+  const documentIssuer = typeof payload.issuer === 'string' ? payload.issuer : undefined
+  if (documentIssuer === undefined) {
+    throw new Error(`metadata at ${metadataUrl} omits the required issuer field`)
+  }
+  if (documentIssuer !== expectedIssuer) {
+    throw new Error(`issuer mismatch at ${metadataUrl}: ${documentIssuer} (expected ${expectedIssuer})`)
+  }
+  const authorizationEndpoint = absoluteHttpUrl(payload.authorization_endpoint)
+  const tokenEndpoint = absoluteHttpUrl(payload.token_endpoint)
+  if (authorizationEndpoint === undefined || tokenEndpoint === undefined) {
+    throw new Error(`incomplete metadata at ${metadataUrl}`)
+  }
+  const revocationEndpoint = absoluteHttpUrl(payload.revocation_endpoint)
+  return {
+    authorizationEndpoint,
+    tokenEndpoint,
+    ...(revocationEndpoint !== undefined ? { revocationEndpoint } : {}),
+  }
 }
 
 /** Test seam: drop the process-wide discovery cache. */
