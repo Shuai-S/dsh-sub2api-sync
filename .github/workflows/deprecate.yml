@@ -1,0 +1,34 @@
+# One-off maintenance: mark published versions below a threshold as
+# deprecated on both published names. Requires the same NPM_TOKEN secret
+# as release.yml (publish rights to both names).
+name: Deprecate versions
+
+on:
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: 'Semver upper bound - every published version below this gets deprecated, e.g. 0.3.0'
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  deprecate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Deprecate versions below threshold (both names)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for PKG in dsh-sub2api-sync "@mangoc/dsh-sub2api-sync"; do
+            npm deprecate "$PKG@<${{ inputs.threshold }}" \
+              "Deprecated: upgrade to >= ${{ inputs.threshold }} (OAuth discovery redesigned per RFC 8414 with mandatory issuer validation; earlier releases can adopt the wrong authorization server behind a shared host root)." \
+              --registry=https://registry.npmjs.org
+          done
