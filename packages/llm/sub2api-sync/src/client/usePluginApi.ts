@@ -116,7 +116,12 @@ export function createPluginApi(): PluginApi {
       // Read via globalThis so the file also type-checks in the server
       // program (no DOM lib there); undefined outside a browser.
       const origin = (globalThis as unknown as { location?: { origin?: string } }).location?.origin
-      return callJson<OAuthStartResponse>(ROUTES.oauthStart, post(origin === undefined ? undefined : { origin }))
+      // Desktop-shell channel only: the callback page's dsh://open pull-back
+      // makes sense when this GUI IS the desktop app (Electron UA). A plain
+      // browser tab on another engine's web UI must never pull it.
+      const nav = (globalThis as unknown as { navigator?: { userAgent?: string } }).navigator
+      const pullApp = typeof nav?.userAgent === 'string' && nav.userAgent.includes('Electron')
+      return callJson<OAuthStartResponse>(ROUTES.oauthStart, post(origin === undefined ? undefined : { origin, pullApp }))
     },
     oauthProbe: (address) =>
       callJson<OAuthProbeResponse>(`${ROUTES.oauthProbe}?address=${encodeURIComponent(address)}`),

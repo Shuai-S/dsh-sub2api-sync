@@ -419,6 +419,10 @@ export interface OAuthAttempt {
   verifier: string
   redirectUri: string
   scope: string
+  /** Whether the initiating client asked for a desktop app pull-back: only
+   * the desktop shell channel may navigate `dsh://open` from the callback
+   * page — a plain browser GUI (another engine's own web UI) must not. */
+  pullApp: boolean
   phase: OAuthAttemptPhase
   error?: string
   createdAt: number
@@ -435,7 +439,7 @@ export class OAuthAttemptStore {
 
   constructor(private readonly ttlMs: number = OAUTH_ATTEMPT_TTL_MS) {}
 
-  create(input: { verifier: string; redirectUri: string; scope: string }, now: number = Date.now()): OAuthAttempt {
+  create(input: { verifier: string; redirectUri: string; scope: string; pullApp?: boolean }, now: number = Date.now()): OAuthAttempt {
     // Lazy GC: a pending attempt abandoned by a closed tab or a lost redirect
     // is never consumed by state, so without this sweep it would live in the
     // registry forever (the host process is long-lived). Deleting during
@@ -449,6 +453,7 @@ export class OAuthAttemptStore {
       verifier: input.verifier,
       redirectUri: input.redirectUri,
       scope: input.scope,
+      pullApp: input.pullApp === true,
       phase: 'pending',
       createdAt: now,
     }
@@ -518,12 +523,18 @@ export class OAuthAttemptStore {
 export type CallbackLang = 'zh' | 'en'
 
 /** Small HTML hand-back page for the browser redirect (§11.9 of the design).
- * The success variant also attempts to pull the desktop app forward: DSH
- * registers `dsh://` as an OS protocol and its shell focuses the primary
- * window on `dsh://open`. The auto-attempt rides a hidden iframe (fails
- * silently when the scheme is not registered, e.g. plain web UI), and an
- * explicit button keeps a user-gesture fallback. */
-export function callbackPageHtml(outcome: 'success' | 'failure', message: string, lang: CallbackLang = 'zh'): string {
+ * The success variant pulls the desktop app forward ONLY on the desktop
+ * channel (`pullApp`): DSH registers `dsh://` as an OS protocol and its shell
+ * focuses the primary window on `dsh://open` — an auto-attempt rides a hidden
+ * iframe 800ms after load, with the button as a user-gesture fallback. A
+ * plain browser GUI (e.g. another engine's own web UI) must never pull the
+ * desktop app, so it renders neither. */
+export function callbackPageHtml(
+  outcome: 'success' | 'failure',
+  message: string,
+  lang: CallbackLang = 'zh',
+  pullApp = false,
+): string {
   const copy = {
     zh: {
       successTitle: '授权成功',
@@ -591,6 +602,22 @@ ${art}
 </body>
 </html>`
   }
+  const buttonHtml = pullApp ? `\n  <button type="button" id="s2s-back">${copy.openApp}</button>` : ''
+  const pullScript = pullApp
+    ? `  function pullApp() {
+    try {
+      var frame = document.createElement('iframe');
+      frame.style.display = 'none';
+      frame.src = 'dsh://open';
+      document.body.appendChild(frame);
+      setTimeout(function () { frame.remove() }, 4000);
+    } catch (e) {}
+  }
+  setTimeout(pullApp, 800);
+  var button = document.getElementById('s2s-back');
+  if (button) button.addEventListener('click', function () { location.href = 'dsh://open' });
+`
+    : ''
   return `<!doctype html>
 <html lang="${copy.htmlLang}">
 <head>
@@ -608,26 +635,13 @@ ${art}
 <main>
   ${brand}
   <h1>${title}</h1>
-  <p>${detail}</p>
-  <button type="button" id="s2s-back">${copy.openApp}</button>
+  <p>${detail}</p>${buttonHtml}
 </main>
 </div>
 ${art}
 <script>
 (function () {
-  function pullApp() {
-    try {
-      var frame = document.createElement('iframe');
-      frame.style.display = 'none';
-      frame.src = 'dsh://open';
-      document.body.appendChild(frame);
-      setTimeout(function () { frame.remove() }, 4000);
-    } catch (e) {}
-  }
-  setTimeout(pullApp, 800);
-  var button = document.getElementById('s2s-back');
-  if (button) button.addEventListener('click', function () { location.href = 'dsh://open' });
-  try { setTimeout(function () { window.close() }, 30000) } catch (e) {}
+${pullScript}  try { setTimeout(function () { window.close() }, 30000) } catch (e) {}
 })();
 </script>
 </body>

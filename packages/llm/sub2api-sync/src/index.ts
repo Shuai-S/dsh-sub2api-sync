@@ -379,7 +379,7 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
         return false
       }
     },
-    oauthStart: async (requestOrigin, clientOrigin) => {
+    oauthStart: async (requestOrigin, clientOrigin, pullApp) => {
       const instanceValue = instance()
       if (!/^https?:\/\//i.test(instanceValue)) {
         throw new Error('请先填写 sub2api 实例地址，再发起网页授权')
@@ -395,7 +395,7 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
       })
       const endpoints = await discoverOAuthEndpoints(instanceValue)
       const { verifier, challenge } = await createPkcePair()
-      const attempt = oauthAttempts.create({ verifier, redirectUri, scope: oauthScopesFor(source().deleteOrphanKeys) })
+      const attempt = oauthAttempts.create({ verifier, redirectUri, scope: oauthScopesFor(source().deleteOrphanKeys), pullApp: pullApp === true })
       const authorizeUrl = buildAuthorizeUrl(endpoints, {
         redirectUri,
         scope: attempt.scope,
@@ -437,10 +437,16 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
         warmProbe()
         // Success copy mirrors the official landing page verbatim; the
         // dynamic failure details stay as the provider/host produced them.
-        const successMessage = lang === 'en'
-          ? 'You can close this page and return to the desktop app to continue.'
-          : '你可以关闭此页面，返回桌面端继续工作。'
-        return { html: callbackPageHtml('success', successMessage, lang) }
+        // The desktop-channel copy mentions the app pull-back; a plain
+        // browser GUI just tells the user to close the tab.
+        const successMessage = attempt.pullApp
+          ? (lang === 'en'
+            ? 'You can close this page and return to the desktop app to continue.'
+            : '你可以关闭此页面，返回桌面端继续工作。')
+          : (lang === 'en'
+            ? 'Authorization complete. You can close this page now.'
+            : '授权成功，你可以关闭此页面。')
+        return { html: callbackPageHtml('success', successMessage, lang, attempt.pullApp) }
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause)
         oauthAttempts.settle(attempt.id, 'failed', message)

@@ -66,6 +66,14 @@ describe('OAuthAttemptStore', () => {
     expect(store.takeByState(attempt.state)).toBeUndefined()
   })
 
+  it('carries the pullApp channel flag; absent means false', () => {
+    const store = new OAuthAttemptStore()
+    const desktop = store.create({ verifier: 'v', redirectUri: 'http://127.0.0.1:1/x', scope: 'openid', pullApp: true })
+    expect(store.takeByState(desktop.state)?.pullApp).toBe(true)
+    const plain = store.create({ verifier: 'v2', redirectUri: 'http://127.0.0.1:1/x', scope: 'openid' })
+    expect(store.takeByState(plain.state)?.pullApp).toBe(false)
+  })
+
   it('expires attempts past the TTL', () => {
     const store = new OAuthAttemptStore(60_000)
     const attempt = store.create({ verifier: 'v', redirectUri: 'http://127.0.0.1:1/x', scope: 'openid' }, 0)
@@ -322,8 +330,8 @@ describe('oauthScopesFor', () => {
 })
 
 describe('callbackPageHtml', () => {
-  it('success page (zh default): brand row, single-locale title, official message, 打开应用 button', () => {
-    const html = callbackPageHtml('success', '你可以关闭此页面，返回桌面端继续工作。')
+  it('success page (zh, desktop channel): brand row, single-locale title, official message, 打开应用 button', () => {
+    const html = callbackPageHtml('success', '你可以关闭此页面，返回桌面端继续工作。', 'zh', true)
     expect(html).toContain('<span class="wordmark">Sub2API</span>')
     expect(html).toContain('<span class="badge">SYNC</span>')
     expect(html).toContain('<title>授权成功</title>')
@@ -337,13 +345,22 @@ describe('callbackPageHtml', () => {
     expect(html).not.toContain('class="hint"')
   })
 
-  it('renders English copy when the callback locale is en', () => {
-    const html = callbackPageHtml('success', 'You can close this page and return to the desktop app to continue.', 'en')
+  it('renders English copy when the callback locale is en (desktop channel)', () => {
+    const html = callbackPageHtml('success', 'You can close this page and return to the desktop app to continue.', 'en', true)
     expect(html).toContain('<title>Authorization complete</title>')
     expect(html).toContain('<h1>Authorization complete</h1>')
     expect(html).toContain('>Open app</button>')
     expect(html).toContain('lang="en"')
     expect(html).not.toContain('授权成功')
+  })
+
+  it('success page without the desktop channel: no pull-back iframe, no button, close-tab copy only', () => {
+    const html = callbackPageHtml('success', '授权成功，你可以关闭此页面。')
+    expect(html).not.toContain('dsh://open')
+    expect(html).not.toContain('s2s-back')
+    expect(html).not.toContain('>打开应用</button>')
+    expect(html).toContain('授权成功，你可以关闭此页面。')
+    expect(html).toContain('window.close()')
   })
 
   it('keeps the official dark-gradient welcome panel on the right (both variants)', () => {

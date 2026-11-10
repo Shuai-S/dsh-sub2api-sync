@@ -345,8 +345,10 @@ export interface RouteDeps {
   /** Begin one OAuth authorization attempt. `requestOrigin` comes from the
    * request's Host header (proxy-blind); `clientOrigin` is the browser half's
    * declared `location.origin` (absent from older clients) — the host half
-   * resolves the callback origin from both plus its config override. */
-  oauthStart(requestOrigin: string, clientOrigin?: unknown): Promise<{ attemptId: string; authorizeUrl: string }>
+   * resolves the callback origin from both plus its config override.
+   * `pullApp` marks the desktop-shell channel: only it renders the callback
+   * page's `dsh://open` pull-back (auto iframe + button). */
+  oauthStart(requestOrigin: string, clientOrigin?: unknown, pullApp?: boolean): Promise<{ attemptId: string; authorizeUrl: string }>
   /** Whether the given instance address publishes OAuth discovery metadata
    * (host-side fetch — the browser cannot probe cross-origin). */
   oauthProbe(address: string): Promise<boolean>
@@ -595,8 +597,8 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
       if (!guard(req, res)) return
       if (!method('POST', req, res)) return
       try {
-        const body = await readJson(req) as { origin?: unknown }
-        const started = await deps.oauthStart(requestOrigin(req), body.origin)
+        const body = await readJson(req) as { origin?: unknown; pullApp?: unknown }
+        const started = await deps.oauthStart(requestOrigin(req), body.origin, body.pullApp === true)
         json(res, 200, { ok: true, attemptId: started.attemptId, authorizeUrl: started.authorizeUrl } satisfies OAuthStartResponse)
       } catch (error) {
         json(res, 400, { ok: false, error: safeMessage(error) })

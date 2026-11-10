@@ -395,35 +395,35 @@ describe('oauthProbe route', () => {
 describe('oauthStart route', () => {
   it('forwards the request origin and the client-declared origin to the dep', async () => {
     const { ctx, handlers } = fakeCtx()
-    const seen: Array<{ requestOrigin: string; clientOrigin: unknown }> = []
+    const seen: Array<{ requestOrigin: string; clientOrigin: unknown; pullApp: boolean }> = []
     registerRoutes(ctx, depsStub({
-      oauthStart: async (requestOrigin, clientOrigin) => {
-        seen.push({ requestOrigin, clientOrigin })
+      oauthStart: async (requestOrigin, clientOrigin, pullApp) => {
+        seen.push({ requestOrigin, clientOrigin, pullApp: pullApp === true })
         return { attemptId: 'a-1', authorizeUrl: 'http://panel:9000/api/v1/oauth/authorize?x=1' }
       },
     }))
     const result = await call(handlers, ROUTES.oauthStart, {
       method: 'POST',
-      body: { origin: 'http://10.10.10.20:3079' },
+      body: { origin: 'http://10.10.10.20:3079', pullApp: true },
       headers: { host: '10.10.10.20:3079' },
     })
     expect(result.status).toBe(200)
     expect(result.body).toEqual({ ok: true, attemptId: 'a-1', authorizeUrl: 'http://panel:9000/api/v1/oauth/authorize?x=1' })
-    expect(seen).toEqual([{ requestOrigin: 'http://10.10.10.20:3079', clientOrigin: 'http://10.10.10.20:3079' }])
+    expect(seen).toEqual([{ requestOrigin: 'http://10.10.10.20:3079', clientOrigin: 'http://10.10.10.20:3079', pullApp: true }])
   })
 
   it('passes a missing client origin as undefined (older clients)', async () => {
     const { ctx, handlers } = fakeCtx()
-    const seen: Array<{ requestOrigin: string; clientOrigin: unknown }> = []
+    const seen: Array<{ requestOrigin: string; clientOrigin: unknown; pullApp: boolean }> = []
     registerRoutes(ctx, depsStub({
-      oauthStart: async (requestOrigin, clientOrigin) => {
-        seen.push({ requestOrigin, clientOrigin })
+      oauthStart: async (requestOrigin, clientOrigin, pullApp) => {
+        seen.push({ requestOrigin, clientOrigin, pullApp: pullApp === true })
         return { attemptId: 'a-2', authorizeUrl: 'http://panel:9000/api/v1/oauth/authorize?x=2' }
       },
     }))
     const result = await call(handlers, ROUTES.oauthStart, { method: 'POST', body: {} })
     expect(result.status).toBe(200)
-    expect(seen).toEqual([{ requestOrigin: 'http://localhost:5173', clientOrigin: undefined }])
+    expect(seen).toEqual([{ requestOrigin: 'http://localhost:5173', clientOrigin: undefined, pullApp: false }])
   })
 })
 
