@@ -1,0 +1,33 @@
+# One-off maintenance: unpublish a single version on both published names.
+# npm only allows unpublishing within 72h of publish; older versions must be
+# deprecated via deprecate.yml instead. Requires the same NPM_TOKEN secret.
+name: Unpublish version
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact version to unpublish on both names, e.g. 0.3.0'
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  unpublish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Unpublish version on both names
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for PKG in dsh-sub2api-sync "@mangoc/dsh-sub2api-sync"; do
+            npm unpublish "$PKG@${{ inputs.version }}" \
+              --registry=https://registry.npmjs.org
+          done
