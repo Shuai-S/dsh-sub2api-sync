@@ -247,6 +247,18 @@ export function parseCatalog(catalog: unknown): ModelMetaIndex {
   // Every id a first-party provider carries, effort data or not — presence is
   // the silencing condition, not effort-data presence.
   const firstPartyIds = new Set<string>()
+  // Capacity facts accumulate per id as VALUES, not as a running maximum: the
+  // resolution (see `resolveCapacityFact`) is decided after the walk.
+  const contexts = new Map<string, number[]>()
+  const outputs = new Map<string, number[]>()
+  const firstPartyContexts = new Map<string, number[]>()
+  const firstPartyOutputs = new Map<string, number[]>()
+  const collect = (map: Map<string, number[]>, key: string, value: unknown): void => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return
+    const list = map.get(key)
+    if (list === undefined) map.set(key, [value])
+    else list.push(value)
+  }
   for (const [providerName, provider] of Object.entries(catalog as Record<string, unknown>)) {
     if (provider === null || typeof provider !== 'object') continue
     const models = (provider as Record<string, unknown>).models
@@ -263,6 +275,12 @@ export function parseCatalog(catalog: unknown): ModelMetaIndex {
       const image = (Array.isArray(input) && input.includes('image')) || model.attachment === true
       const key = id.toLowerCase()
       if (firstParty) firstPartyIds.add(key)
+      collect(contexts, key, context)
+      collect(outputs, key, output)
+      if (firstParty) {
+        collect(firstPartyContexts, key, context)
+        collect(firstPartyOutputs, key, output)
+      }
       // Effort sources are collected for every entry, duplicated or not — the
       // first-party merge happens after the walk (see below).
       const levels = effortLevelsOf(model)
@@ -290,13 +308,31 @@ export function parseCatalog(catalog: unknown): ModelMetaIndex {
         }
         continue
       }
+      // Capacity fields are placeholders here — the post-walk pass resolves
+      // them from the collected values (see below); only the union flags merge
+      // per entry.
       index.set(key, {
-        contextWindow: pickGreater(current.contextWindow, next.contextWindow),
-        maxTokens: pickGreater(current.maxTokens, next.maxTokens),
-        imageInput: current.imageInput === true || next.imageInput === true,
-        reasoningModel: current.reasoningModel === true || next.reasoningModel === true,
+        ...(current.contextWindow ?? next.contextWindow) !== undefined
+          ? { contextWindow: (current.contextWindow ?? next.contextWindow) as number }
+          : {},
+        ...(current.maxTokens ?? next.maxTokens) !== undefined
+          ? { maxTokens: (current.maxTokens ?? next.maxTokens) as number }
+          : {},
+        ...(current.imageInput === true || next.imageInput === true ? { imageInput: true } : {}),
+        ...(current.reasoningModel === true || next.reasoningModel === true ? { reasoningModel: true } : {}),
       })
     }
+  }
+  // Capacity: an optimistic aggregator must not inflate a route. The max over
+  // all sources is how a relay ended up advertising max_output_tokens=1050000
+  // for a model whose upstream allows 393216 — every request using that entry
+  // is then rejected by the real API. First-party sources decide when they
+  // report a number; otherwise the lower median of every source does.
+  for (const [key, meta] of index) {
+    const context = resolveCapacityFact(contexts.get(key) ?? [], firstPartyContexts.get(key) ?? [])
+    const output = resolveCapacityFact(outputs.get(key) ?? [], firstPartyOutputs.get(key) ?? [])
+    if (context !== undefined) meta.contextWindow = context
+    if (output !== undefined) meta.maxTokens = context !== undefined ? Math.min(output, context) : output
   }
   for (const [key, sources] of firstPartySources) attachEfforts(index, key, sources)
   // A first-party entry for the id — with or without effort data — wins; its
@@ -324,10 +360,26 @@ export function parseCatalog(catalog: unknown): ModelMetaIndex {
   return index
 }
 
-function pickGreater(a: number | undefined, b: number | undefined): number | undefined {
-  if (a === undefined) return b
-  if (b === undefined) return a
-  return Math.max(a, b)
+/** Lower median of a copy — the conservative side of a disagreement. */
+function lowerMedian(values: readonly number[]): number | undefined {
+  if (values.length === 0) return undefined
+  const sorted = [...values].sort((a, b) => a - b)
+  return sorted[(sorted.length - 1) >> 1]
+}
+
+/**
+ * Resolve one capacity fact (context window or max output tokens) from every
+ * provider that reports it. First-party sources decide when they carry a
+ * number; otherwise the LOWER MEDIAN of all sources wins.
+ *
+ * Never the maximum: models.dev lists both the real vendor limit and the
+ * numbers aggregators advertise, and a single optimistic entry used to decide
+ * the whole route. That is how a synced route ended up with
+ * `max_output_tokens = 1050000` for a model whose upstream allows 393216 —
+ * the catalog is not wrong, taking its maximum was.
+ */
+export function resolveCapacityFact(values: readonly number[], firstPartyValues: readonly number[] = []): number | undefined {
+  return lowerMedian(firstPartyValues) ?? lowerMedian(values)
 }
 
 /** The bundled offline snapshot, read once per process. */
@@ -344,36 +396,100 @@ export function bundledIndex(): ModelMetaIndex {
 }
 
 /**
- * Resolve the index for one sync run. With `enrich` on, a fresh fetch is
- * attempted and cached for 24h (failures degrade to the bundled snapshot and
- * are negative-cached for 1h so a dead endpoint is not retried per sync but
- * an outage self-heals within the hour); with `enrich` off, only the bundled
- * snapshot is used — deterministic and offline.
+ * Longest one catalog refresh may occupy the wire. The catalog is ~6.9 MB, so
+ * a healthy fetch lands in seconds; the cap exists so a stalled connection
+ * degrades to the bundled snapshot instead of hanging a background task (and,
+ * before this cap existed, the whole sync) indefinitely.
  */
-export async function loadModelIndex(options: { enrich: boolean; fetchImpl?: typeof fetch; now?: () => number }): Promise<ModelMetaIndex> {
-  const now = (options.now ?? Date.now)()
-  if (networkCache !== undefined && now - networkCache.at < (networkCache.ok ? TTL : NEGATIVE_TTL)) return networkCache.index
-  if (options.enrich) {
+export const CATALOG_TIMEOUT_MS = 15_000
+
+/** Remaining lifetime of the cache entry at `now`: >0 fresh, 0 expired/absent. */
+function cacheFreshFor(now: number): number {
+  if (networkCache === undefined) return 0
+  return (networkCache.ok ? TTL : NEGATIVE_TTL) - (now - networkCache.at)
+}
+
+/**
+ * The cached catalog WITHOUT touching the network — `undefined` when no live
+ * entry exists (never fetched, or its TTL lapsed). This is the sync path's
+ * entry point: the catalog download must never sit on a sync's critical path.
+ */
+export function peekModelIndex(now: number = Date.now()): ModelMetaIndex | undefined {
+  return cacheFreshFor(now) > 0 ? networkCache?.index : undefined
+}
+
+let refreshInFlight: Promise<ModelMetaIndex> | undefined
+
+/**
+ * Refresh the catalog off the critical path. Single-flight per process
+ * (concurrent callers share one wire call), bounded by
+ * {@link CATALOG_TIMEOUT_MS}, and never rejects: a failure leaves the bundled
+ * snapshot negative-cached for {@link NEGATIVE_TTL}, so a dead endpoint costs
+ * one attempt per hour, not one per sync.
+ */
+export function refreshModelIndex(options: { fetchImpl?: typeof fetch; now?: () => number; timeoutMs?: number } = {}): Promise<ModelMetaIndex> {
+  // A live cache entry wins over a refresh: callers refresh SPECULATIVELY
+  // (activation, hover-free warm-ups), and a second 6.9 MB download that would
+  // change nothing is pure waste.
+  const cached = peekModelIndex()
+  if (cached !== undefined && refreshInFlight === undefined) return Promise.resolve(cached)
+  refreshInFlight ??= (async () => {
+    const now = (options.now ?? Date.now)()
     try {
       const doFetch = options.fetchImpl ?? globalThis.fetch
       if (doFetch === undefined) throw new Error('no fetch available')
-      const response = await doFetch(SOURCE_URL)
+      const response = await doFetch(SOURCE_URL, { signal: AbortSignal.timeout(options.timeoutMs ?? CATALOG_TIMEOUT_MS) })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const catalog: unknown = await response.json()
       const index = parseCatalog(catalog)
       networkCache = { index, at: now, ok: true }
       return index
     } catch {
-      // Fall through to the bundled snapshot; negative-cached below.
+      const bundled = bundledIndex()
+      networkCache = { index: bundled, at: now, ok: false }
+      return bundled
+    } finally {
+      refreshInFlight = undefined
     }
-  }
+  })()
+  return refreshInFlight
+}
+
+/**
+ * The metadata index for ONE sync run, resolved without waiting on the wire:
+ * the live cache when fresh, else the bundled snapshot — while a background
+ * refresh warms the cache for the next run. Enrichment is a display-quality
+ * nicety (context windows, names, effort levels), so a one-run lag is far
+ * cheaper than putting a multi-second download in front of every sync.
+ */
+export function modelIndexForSync(options: { enrich: boolean; fetchImpl?: typeof fetch }): ModelMetaIndex {
+  const cached = peekModelIndex()
+  if (cached !== undefined) return cached
   const bundled = bundledIndex()
-  if (options.enrich) networkCache = { index: bundled, at: now, ok: false }
+  if (options.enrich) {
+    void refreshModelIndex(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}).catch(() => undefined)
+  }
   return bundled
+}
+
+/**
+ * Resolve the index, waiting for a fetch when one is needed. With `enrich` on
+ * a fresh fetch is cached for 24h (failures negative-cache the bundled
+ * snapshot for 1h); with `enrich` off only the bundled snapshot is used —
+ * deterministic and offline. The SYNC path uses {@link modelIndexForSync}
+ * instead; this blocking form stays for callers that want a warm answer.
+ */
+export async function loadModelIndex(options: { enrich: boolean; fetchImpl?: typeof fetch; now?: () => number; timeoutMs?: number }): Promise<ModelMetaIndex> {
+  const now = (options.now ?? Date.now)()
+  const cached = peekModelIndex(now)
+  if (cached !== undefined) return cached
+  if (!options.enrich) return bundledIndex()
+  return refreshModelIndex({ ...options, now: () => now })
 }
 
 /** Test/reset hook: forget the in-process caches. */
 export function resetCaches(): void {
   networkCache = undefined
   bundledCache = undefined
+  refreshInFlight = undefined
 }

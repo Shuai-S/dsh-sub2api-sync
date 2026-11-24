@@ -7,8 +7,11 @@
 // normalized level array — `none` stands for pi-ai's `off`, the rest are wire
 // spellings passed through verbatim — and `name` (present only when the id
 // resolves to a display name) is models.dev's `name` with its " (latest)"
-// marker stripped. Collisions (the same id under several providers) merge
-// with max(context), max(output), OR(image), OR(reasoning); effort levels
+// marker stripped. Collisions (the same id under several providers) resolve
+// capacity with src/enrich.ts's `resolveCapacityFact` — a first-party source
+// decides when it reports a number, otherwise the lower median wins (never the
+// max: one optimistic aggregator must not inflate the route) — and OR(image),
+// OR(reasoning); effort levels
 // follow parseCatalog's first-party preference (whose vocabulary and provider
 // set are imported from src/enrich.ts — single source of truth): first-party
 // sources win outright, otherwise aggregator sources intersect. Display names
@@ -22,7 +25,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { displayNameOf, EFFORT_VOCABULARY, FIRST_PARTY_PROVIDERS } from '../src/enrich.ts'
+import { displayNameOf, EFFORT_VOCABULARY, FIRST_PARTY_PROVIDERS, resolveCapacityFact } from '../src/enrich.ts'
 
 const SOURCE_URL = 'https://models.dev/api.json'
 const OUT = join(dirname(fileURLToPath(import.meta.url)), '../data/models-dev.snapshot.json')
@@ -42,16 +45,32 @@ const catalog = await (async () => {
 })()
 
 const tuples = new Map()
-const merge = (id, context, output, image, reasoning) => {
+// Capacity facts collect as VALUES; the tuple's [0]/[1] stay placeholders until
+// the resolution pass below (same policy as src/enrich.ts parseCatalog).
+const contexts = new Map()
+const outputs = new Map()
+const firstPartyContexts = new Map()
+const firstPartyOutputs = new Map()
+const collect = (map, key, value) => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return
+  const list = map.get(key)
+  if (list === undefined) map.set(key, [value])
+  else list.push(value)
+}
+const merge = (id, context, output, image, reasoning, firstParty) => {
   const key = String(id).toLowerCase()
   if (key.length === 0) return
+  collect(contexts, key, context)
+  collect(outputs, key, output)
+  if (firstParty) {
+    collect(firstPartyContexts, key, context)
+    collect(firstPartyOutputs, key, output)
+  }
   const current = tuples.get(key)
   if (current === undefined) {
     tuples.set(key, [context, output, image ? 1 : 0, reasoning ? 1 : 0])
     return
   }
-  if (context !== undefined && (current[0] === undefined || context > current[0])) current[0] = context
-  if (output !== undefined && (current[1] === undefined || output > current[1])) current[1] = output
   if (image) current[2] = 1
   if (reasoning) current[3] = 1
 }
@@ -125,10 +144,18 @@ for (const [providerName, provider] of Object.entries(catalog)) {
     const output = model?.limit?.output
     const image = model?.modalities?.input?.includes('image') === true || model?.attachment === true
     const reasoning = model?.reasoning === true
-    merge(key, typeof context === 'number' ? context : undefined, typeof output === 'number' ? output : undefined, image, reasoning)
+    merge(key, typeof context === 'number' ? context : undefined, typeof output === 'number' ? output : undefined, image, reasoning, firstParty)
     recordEfforts(key, model, firstParty)
     recordName(key, model, firstParty)
   }
+}
+// Capacity: first-party sources decide when present, otherwise the lower
+// median of every source.
+for (const [key, tuple] of tuples) {
+  const context = resolveCapacityFact(contexts.get(key) ?? [], firstPartyContexts.get(key) ?? [])
+  const output = resolveCapacityFact(outputs.get(key) ?? [], firstPartyOutputs.get(key) ?? [])
+  tuple[0] = context
+  tuple[1] = output === undefined ? undefined : (context === undefined ? output : Math.min(output, context))
 }
 for (const [key, sources] of effortSources.firstParty) resolveEfforts(key, sources)
 // A first-party entry for the id — with or without effort data — wins; its

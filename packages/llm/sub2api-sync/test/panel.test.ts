@@ -35,6 +35,8 @@ interface PanelCall {
 interface FakeResponse {
   status?: number
   body?: unknown
+  /** Artificial latency, for ordering-sensitive races (concurrent refreshes). */
+  delayMs?: number
 }
 
 /** Route-by-method+path fake panel server that records every call. */
@@ -52,6 +54,7 @@ function makeServer(handler: (call: PanelCall) => FakeResponse | undefined): { c
     }
     calls.push(call)
     const result = handler(call)
+    if (result?.delayMs !== undefined) await new Promise((resolve) => { setTimeout(resolve, result.delayMs) })
     const status = result?.status ?? 404
     return {
       ok: status >= 200 && status < 300,
@@ -362,5 +365,78 @@ describe('PanelGateway', () => {
     await gateway.logout()
     expect(await creds.resolve(panelTokenRef(BASE))).toBeUndefined()
     expect(await creds.resolve(panelRefreshRef(BASE))).toBeUndefined()
+  })
+})
+describe('request timeout', () => {
+  it('answers 408 when a panel call outlives the cap', async () => {
+    const fetchImpl = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+      })
+    })) as typeof fetch
+    const client = new PanelClient({ baseURL: BASE, fetchImpl, timeoutMs: 5 })
+    await expect(client.listAvailableGroups('t')).rejects.toMatchObject({ status: 408 })
+    await expect(client.listAvailableGroups('t')).rejects.toThrow(/超时/)
+  })
+})
+describe('refresh races', () => {
+  it('adopts a token another caller already refreshed instead of refreshing twice', async () => {
+    const creds = new FakeCreds()
+    creds.seed(panelTokenRef(BASE), 'stale')
+    creds.seed(panelRefreshRef(BASE), 'rt-1')
+    let keysCalls = 0
+    let refreshCalls = 0
+    const { fetchImpl } = makeServer((call) => {
+      if (call.path.startsWith('/api/v1/keys')) {
+        keysCalls++
+        // Call 1 401s at once, call 2 401s AFTER the first refresh finished —
+        // exactly the straggler that used to spend a rotated refresh token.
+        if (keysCalls === 1) return { status: 401, body: { code: 401, message: 'expired' } }
+        if (keysCalls === 2) return { status: 401, body: { code: 401, message: 'expired' }, delayMs: 60 }
+        return ok({ items: [], total: 0, page: 1, page_size: 100, pages: 0 })
+      }
+      if (call.path === '/api/v1/auth/refresh') {
+        refreshCalls++
+        return ok({ access_token: 'fresh', refresh_token: 'rt-2' })
+      }
+      return undefined
+    })
+    const gateway = new PanelGateway({ baseURL: BASE, credentials: creds, fetchImpl })
+    const results = await Promise.all([
+      gateway.use((panel, token) => panel.listKeys(token)),
+      gateway.use((panel, token) => panel.listKeys(token)),
+    ])
+    expect(results.map((page) => page.items)).toEqual([[], []])
+    // One refresh for the whole burst: the straggler adopted 'fresh'.
+    expect(refreshCalls).toBe(1)
+    expect(await creds.resolve(panelTokenRef(BASE))).toEqual({ value: 'fresh' })
+  })
+
+  it('keeps the session when a lost refresh race fails', async () => {
+    const creds = new FakeCreds()
+    creds.seed(panelTokenRef(BASE), 'stale')
+    creds.seed(panelRefreshRef(BASE), 'dead')
+    let keysCalls = 0
+    const onAuthLost = vi.fn()
+    const { fetchImpl } = makeServer((call) => {
+      if (call.path.startsWith('/api/v1/keys')) {
+        keysCalls++
+        if (keysCalls === 1) {
+          // Meanwhile another caller won: the store already holds a good token.
+          void creds.set(panelTokenRef(BASE), 'winner')
+          return { status: 401, body: { code: 401, message: 'expired' } }
+        }
+        return ok({ items: [], total: 0, page: 1, page_size: 100, pages: 0 })
+      }
+      // A refresh against the rotated refresh token would fail — but the
+      // gateway must not even try it.
+      if (call.path === '/api/v1/auth/refresh') return { status: 401, body: { code: 401, message: 'rotated' } }
+      return undefined
+    })
+    const gateway = new PanelGateway({ baseURL: BASE, credentials: creds, fetchImpl, onAuthLost })
+    const page = await gateway.use((panel, token) => panel.listKeys(token))
+    expect(page.items).toEqual([])
+    expect(onAuthLost).not.toHaveBeenCalled()
+    expect(await creds.resolve(panelTokenRef(BASE))).toEqual({ value: 'winner' })
   })
 })

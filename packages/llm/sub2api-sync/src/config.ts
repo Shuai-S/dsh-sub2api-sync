@@ -65,6 +65,11 @@ export interface Sub2apiSyncConfig {
   compatTemplate?: ModelTemplate
   /** models.dev metadata enrichment toggle (reserved, C4). */
   enrichModelMeta?: boolean
+  /** How long one key's `/v1/models` answer is reused (seconds; 0 = always
+   * re-query). Default 60 — short enough that a relay-side model change shows
+   * up on the next deliberate sync, long enough that repeat/scheduled syncs
+   * skip the round trip. */
+  discoveryCacheSeconds?: number
   /** Optional quota (USD) for keys the plugin creates. */
   keyQuota?: number
   /** Optional expiry in days for keys the plugin creates. */
@@ -174,6 +179,9 @@ export const Config: z<Sub2apiSyncConfig, any> = z.object({
   enrichModelMeta: z.boolean().default(true)
     .description('models.dev 元数据增强（显示名/上下文窗口） / models.dev metadata enrichment')
     .volatile(),
+  discoveryCacheSeconds: z.number().step(1).default(60)
+    .description('模型发现结果缓存秒数（0=每次重查，强制刷新设 0） / Seconds one model-discovery answer is reused (0 = always re-query)')
+    .volatile(),
   keyQuota: z.number()
     .description('新建 key 的额度（USD，可选） / Optional quota (USD) for created keys')
     .volatile(),
@@ -209,7 +217,7 @@ export const Config: z<Sub2apiSyncConfig, any> = z.object({
     .description('允许局域网内其他设备操作面板（默认关；开启后同一局域网的设备可修改模型路由与登录信息，仅限可信内网） / Let other devices on your local network operate the panel (default off — they could change model routes and sign-in details; trusted networks only)')
     .volatile(),
   oauthCallbackOrigin: z.string()
-    .description('网页授权回调地址覆盖（留空自动；经自建域名/HTTPS 反代访问时填浏览器可达的 origin，如 http://192.168.1.10:3079） / OAuth callback origin override (empty = auto; set the browser-reachable origin, e.g. http://192.168.1.10:3079, when accessing via a self-hosted domain or an HTTPS reverse proxy)')
+    .description('网页授权回调地址覆盖（留空自动；仅当经自建域名/HTTPS 反代访问、且该 origin 已在 sub2api 实例登记时才填，如 https://dsh.example.com） / OAuth callback origin override (empty = auto; set it only when the GUI sits behind a self-hosted domain or HTTPS reverse proxy AND that origin is registered on the sub2api instance, e.g. https://dsh.example.com)')
     .volatile(),
   panelCredential: panelCredentialSlot.volatile(),
 })
@@ -270,7 +278,7 @@ export function validateConfig(config: Sub2apiSyncConfig): void {
         && !parsed.search && !parsed.hash
     } catch {}
     if (!callbackOk) {
-      throw new Error('sub2api-sync: oauthCallbackOrigin 必须是合法的 http(s) origin（不能带路径或查询串），如 http://192.168.1.10:3079')
+      throw new Error('sub2api-sync: oauthCallbackOrigin 必须是合法的 http(s) origin（不能带路径或查询串），如 https://dsh.example.com')
     }
   }
   const compat = config.compatTemplate
@@ -306,6 +314,9 @@ export function validateConfig(config: Sub2apiSyncConfig): void {
   }
   if (config.defaultMaxTokens !== undefined && (!Number.isSafeInteger(config.defaultMaxTokens) || config.defaultMaxTokens <= 0)) {
     throw new Error('sub2api-sync: defaultMaxTokens 必须是正整数')
+  }
+  if (config.discoveryCacheSeconds !== undefined && (!Number.isSafeInteger(config.discoveryCacheSeconds) || config.discoveryCacheSeconds < 0)) {
+    throw new Error('sub2api-sync: discoveryCacheSeconds 必须是非负整数（0 表示每次重查）')
   }
   const retry = config.retryPolicy
   if (retry !== undefined) {

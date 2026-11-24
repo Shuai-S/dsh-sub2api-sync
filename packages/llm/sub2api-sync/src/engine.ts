@@ -26,10 +26,11 @@
  * @module sub2api-sync/engine
  */
 
+import { createHash } from 'node:crypto'
 import { Sub2apiClient, type GatewayModelEntry } from './client.ts'
 import type { PanelGateway, PanelGroup, PanelKey } from './panel.ts'
 import { buildProviderProfile, protocolForPlatform, renderProviderName, type PiAiProviderProfile, type ProfileModelInput } from './protocols.ts'
-import { loadModelIndex, type ModelMetaIndex } from './enrich.ts'
+import { bundledIndex, type ModelMetaIndex } from './enrich.ts'
 import type { Sub2apiSyncConfig } from './config.ts'
 import {
   isOwnedRoute,
@@ -58,13 +59,22 @@ export interface SyncEngineOptions {
   /** Credential-backed panel gateway (login tokens, single-flight refresh). */
   gateway: PanelGateway
   fetchImpl?: typeof fetch
-  /** Model-metadata index loader (C4); overridable in tests. */
-  loadModelIndex?: typeof loadModelIndex
+  /**
+   * Model-metadata index source (C4). The host injects the NON-blocking
+   * resolver (`modelIndexForSync`), which answers from cache/snapshot and
+   * refreshes off the critical path; the default here is the bundled snapshot
+   * alone, so a unit test can never reach for the network by accident.
+   */
+  loadModelIndex?: (options: { enrich: boolean; fetchImpl?: typeof fetch }) => ModelMetaIndex | Promise<ModelMetaIndex>
   /**
    * The instance's configured site name for the `{siteName}` template
    * placeholder (cached probe; absent/unknown falls back to "sub2api").
    */
   siteName?: () => Promise<string | undefined>
+  /** How many `/v1/models` discoveries run at once (default {@link DISCOVERY_CONCURRENCY}). */
+  discoveryConcurrency?: number
+  /** Clock, injected by tests (discovery-cache TTLs and the timing report). */
+  now?: () => number
 }
 
 export type SyncAction = 'created' | 'updated' | 'unchanged' | 'failed'
@@ -90,7 +100,76 @@ export interface SyncReport {
   /** How many mutate attempts were used (1 = no conflict). */
   attempts: number
   warnings: string[]
+  /** Per-phase wall clock of this run — the card renders it, and it is how a
+   * "the sync feels slow" report gets answered with numbers, not guesses. */
+  timing?: SyncTiming
 }
+
+/**
+ * Wall-clock cost of one sync, split by phase. `discoveryMs` is WALL time for
+ * the whole fan-out (not the sum over keys), so it shows the concurrency win.
+ */
+export interface SyncTiming {
+  /** Panel reads: groups + the key page walk. */
+  panelMs: number
+  /** Metadata index resolution (≈0 when the process cache answered). */
+  catalogMs: number
+  /** `/v1/models` discovery across the selected keys. */
+  discoveryMs: number
+  /** Settings commits (providers + the route→keyId map when it moved). */
+  writeMs: number
+  totalMs: number
+}
+
+/** Which phase a running sync is in (the card's progress line). */
+export type SyncStep = 'panel' | 'models' | 'write'
+
+/**
+ * What one run acts on:
+ * - `selection` (default): exactly the ticked keys — creates new routes,
+ *   updates changed ones, and removes routes whose key left the selection.
+ * - `registered`: only the keys that ALREADY own a route. A refresh re-validates
+ *   and rewrites what exists; it never creates a route for a newly ticked key
+ *   and never removes one. That keeps the sync card's "刷新同步" button from
+ *   doubling as "sync the selection".
+ */
+export type SyncScope = 'selection' | 'registered'
+
+/** One progress snapshot of the sync currently running. */
+export interface SyncProgress {
+  step: SyncStep
+  /** Items finished in this step (keys for `models`, else 0/1). */
+  done: number
+  /** Items this step will finish (0 while unknown). */
+  total: number
+  /** Epoch ms when the run started. */
+  startedAt: number
+}
+
+/**
+ * One target's discovery result, before it is folded into the report and the
+ * desired profile map. `desired`/`profileWarnings` are stripped on the way in.
+ */
+interface KeyOutcome extends SyncEntryOutcome {
+  desired?: PiAiProviderProfile
+  profileWarnings?: string[]
+}
+
+/** Default discovery fan-out: enough to overlap a group's keys, small enough
+ * that a relay's per-key rate limiter stays quiet. */
+export const DISCOVERY_CONCURRENCY = 4
+/** Default model-discovery cache window (config: `discoveryCacheSeconds`). */
+export const DEFAULT_DISCOVERY_CACHE_SECONDS = 60
+/** Keys per panel page during the sync walk. */
+const KEY_WALK_PAGE_SIZE = 100
+/** Panel pages one sync reads (10 × 100 keys). */
+const KEY_WALK_MAX_PAGES = 10
+/** Upper bound on the discovery cache (entries are tiny; a long session should not leak). */
+const DISCOVERY_CACHE_MAX_ENTRIES = 200
+/** Base pause before retrying a rate-limited/timed-out discovery (grows linearly). */
+const DISCOVERY_RETRY_DELAY_MS = 700
+/** Retries after the first discovery attempt (so 3 attempts at most). */
+const DISCOVERY_RETRY_ATTEMPTS = 2
 
 /**
  * In-memory holder for the last accepted sync report (the status
@@ -162,7 +241,7 @@ export function resolveTargets(
   for (const id of config.selectedKeys ?? []) {
     const key = byId.get(id)
     if (key === undefined) {
-      targets.push({ invalid: id, error: `key #${id} 在面板不存在（可能已删除）——请在 Keys 卡刷新后重新勾选` })
+      targets.push({ invalid: id, error: `key #${id} 在面板不存在（可能已删除）——请在 Keys 卡搜索框中回车刷新列表后重新勾选` })
       continue
     }
     targets.push({ key })
@@ -175,18 +254,27 @@ export class Sub2apiSyncEngine {
   private readonly credentials: CredentialsLike
   private readonly gateway: PanelGateway
   private readonly fetchImpl?: typeof fetch
-  private readonly modelIndexLoader: typeof loadModelIndex
+  private readonly modelIndexLoader: (options: { enrich: boolean; fetchImpl?: typeof fetch }) => ModelMetaIndex | Promise<ModelMetaIndex>
   private readonly siteName?: () => Promise<string | undefined>
+  private readonly discoveryConcurrency: number
+  private readonly now: () => number
+  /** Per-process window of proven `/v1/models` answers, so repeat syncs skip
+   * the round trip (see `discoveryCacheSeconds`). Keyed by a digest, never by
+   * the plaintext itself. */
+  private readonly discoveryCache = new Map<string, { models: GatewayModelEntry[]; at: number }>()
   private queue: Promise<unknown> = Promise.resolve()
   private running = false
+  private progressValue: SyncProgress | undefined
 
   constructor(options: SyncEngineOptions) {
     this.settings = options.settings
     this.credentials = options.credentials
     this.gateway = options.gateway
     this.fetchImpl = options.fetchImpl
-    this.modelIndexLoader = options.loadModelIndex ?? loadModelIndex
+    this.modelIndexLoader = options.loadModelIndex ?? (() => bundledIndex())
     this.siteName = options.siteName
+    this.discoveryConcurrency = Math.max(1, options.discoveryConcurrency ?? DISCOVERY_CONCURRENCY)
+    this.now = options.now ?? Date.now
   }
 
   /** Whether a sync is currently executing (UI busy marker). */
@@ -194,106 +282,180 @@ export class Sub2apiSyncEngine {
     return this.running
   }
 
+  /** Progress of the running sync (undefined when idle) — the card's live line. */
+  progress(): SyncProgress | undefined {
+    return this.running ? this.progressValue : undefined
+  }
+
   /**
    * Run one sync. At most one runs at a time — later callers queue behind
    * the previous one (the settings-card button and the timer share this
    * queue).
    */
-  sync(config: Sub2apiSyncConfig, keyIds?: number[]): Promise<SyncReport> {
+  sync(config: Sub2apiSyncConfig, keyIds?: number[], scope: SyncScope = 'selection'): Promise<SyncReport> {
     const run = this.queue.then(
-      () => this.runSync(config, keyIds),
-      () => this.runSync(config, keyIds),
+      () => this.runSync(config, keyIds, scope),
+      () => this.runSync(config, keyIds, scope),
     )
     this.queue = run.then(() => undefined, () => undefined)
     return run
   }
 
-  private async runSync(config: Sub2apiSyncConfig, keyIds?: number[]): Promise<SyncReport> {
+  private async runSync(config: Sub2apiSyncConfig, keyIds: number[] | undefined, scope: SyncScope): Promise<SyncReport> {
     this.running = true
     try {
-      return await this.syncNow(config, keyIds)
+      return await this.syncNow(config, keyIds, scope)
     } finally {
       this.running = false
     }
   }
 
-  private async syncNow(config: Sub2apiSyncConfig, selection?: number[]): Promise<SyncReport> {
+  private async syncNow(config: Sub2apiSyncConfig, selection: number[] | undefined, scope: SyncScope): Promise<SyncReport> {
     const instance = config.baseURL?.trim() ?? ''
     if (!/^https?:\/\//i.test(instance)) {
       throw new Sub2apiSyncError('sub2api-sync: baseURL 未配置或不是 http(s) 地址')
     }
 
+    const startedAt = this.now()
     const entries: SyncEntryOutcome[] = []
     const desired = new Map<string, PiAiProviderProfile>()
+    this.progressValue = { step: 'panel', done: 0, total: 1, startedAt }
 
-    // The panel gates everything: not signed in fails loud here. One pass
-    // gathers the group platform map and every key row (bounded page walk).
-    let keyWalkTruncated = false
-    const { groups, keyRows } = await this.gateway.use(async (panel, token) => {
-      const groupList = await panel.listAvailableGroups(token)
-      const rows: PanelKey[] = []
-      for (let page = 1; page <= 10; page++) {
-        const result = await panel.listKeys(token, { page, pageSize: 100 })
-        rows.push(...result.items)
-        // A panel reporting more pages than the walk visits means the sync
-        // only saw a prefix of the key list — surfaced as a report warning
-        // below instead of silently dropping the tail keys.
-        if (result.pages > 10) keyWalkTruncated = true
-        if (page >= result.pages || result.items.length === 0) break
+    // Phase 1 — three INDEPENDENT reads in flight together: the panel walk
+    // (which gates everything: not signed in fails loud here), the metadata
+    // index (cache or bundled snapshot — never the wire), and the cached
+    // site-name probe. Running them one after another was the bulk of a cold
+    // sync's wall clock.
+    const panelStartedAt = this.now()
+    let catalogMs = 0
+    const catalogRead = (async (): Promise<ModelMetaIndex> => {
+      const at = this.now()
+      try {
+        return await this.modelIndexLoader({
+          enrich: config.enrichModelMeta !== false,
+          ...(this.fetchImpl !== undefined ? { fetchImpl: this.fetchImpl } : {}),
+        })
+      } catch {
+        // Enrichment is display sugar: a broken loader must never fail a sync.
+        return new Map() as ModelMetaIndex
+      } finally {
+        catalogMs = this.now() - at
       }
-      return { groups: groupList, keyRows: rows }
-    })
+    })()
+    const siteRead: Promise<string | undefined> = this.siteName !== undefined
+      ? this.siteName().catch(() => undefined)
+      : Promise.resolve(undefined)
+    const [{ groups, keyRows, truncated: keyWalkTruncated }, modelIndex, site] = await Promise.all([
+      this.readPanel(),
+      catalogRead,
+      siteRead,
+    ])
+    const panelMs = this.now() - panelStartedAt
     const groupById = new Map(groups.map((group) => [group.id, group]))
-
-    // C4: resolve the model-metadata index once per sync (never throws —
-    // the loader degrades to the bundled snapshot, then to route defaults).
-    const modelIndex = await this.modelIndexLoader({ enrich: config.enrichModelMeta !== false, ...(this.fetchImpl !== undefined ? { fetchImpl: this.fetchImpl } : {}) }).catch(
-      () => new Map() as ModelMetaIndex,
-    )
-    // The `{siteName}` placeholder value — one cached probe per sync.
-    const site = await this.siteName?.().catch(() => undefined)
 
     const syncWarnings: string[] = []
     if (keyWalkTruncated) {
-      syncWarnings.push('面板 key 数量超过单次同步的读取上限（10 页 × 100 = 1000 把）——超出部分未参与同步，也不会被移除')
+      syncWarnings.push(`面板 key 数量超过单次同步的读取上限（${KEY_WALK_MAX_PAGES} 页 × ${KEY_WALK_PAGE_SIZE} = ${KEY_WALK_MAX_PAGES * KEY_WALK_PAGE_SIZE} 把）——超出部分未参与同步，也不会被移除`)
     }
     // The `{siteName}` placeholder fell back: say so, or the report silently
     // names providers `sub2api(…)` and the cause stays invisible.
     if (site === undefined && this.siteName !== undefined && (config.providerNameTemplate ?? '').includes('{siteName}')) {
       syncWarnings.push('实例站点名探测失败（实例不可达或页面 <title> 缺失）——displayName 暂用回退名 sub2api，站点名可解析后的同步会自动更正')
     }
-    const effective = { ...config, selectedKeys: selection ?? config.selectedKeys }
-    for (const target of resolveTargets(effective, keyRows)) {
-      if ('invalid' in target) {
-        entries.push({ groupId: target.invalid, route: `${target.invalid}`, action: 'failed', error: target.error, invalid: true })
-        continue
-      }
-      const key = target.key
-      const route = routeForKey(instance, key.id)
-      try {
-        const group = groupById.get(key.groupId)
-        if (group === undefined) {
-          throw new Sub2apiSyncError(`key #${key.id}（${key.name}）的分组 ${key.groupId} 在面板不可用`)
-        }
-        const { profile, warnings: profileWarnings } = await this.buildKeyProfile(config, key, group, instance, modelIndex, site)
-        desired.set(route, profile)
-        syncWarnings.push(...profileWarnings)
-        entries.push({
-          groupId: group.id,
-          route,
-          keyId: key.id,
-          displayName: profile.displayName,
-          action: 'unchanged',
-          models: profile.models?.length ?? 0,
-        })
-      } catch (error) {
-        entries.push({ groupId: key.groupId, route, keyId: key.id, action: 'failed', error: messageOf(error) })
-      }
+
+    // `registered` ignores the caller's list on purpose: the keys behind the
+    // existing routes are the only thing a refresh may touch.
+    const selectedKeys: number[] = scope === 'registered'
+      ? this.registeredKeyIds()
+      : (selection ?? config.selectedKeys ?? [])
+    if (scope === 'registered' && selectedKeys.length === 0) {
+      throw new Sub2apiSyncError('sub2api-sync: 当前没有已注册的路由可刷新——请先在 Keys 卡勾选并用「同步所选」创建路由')
+    }
+    const effective: Sub2apiSyncConfig = { ...config, selectedKeys }
+    // A selected key whose id the panel does not list is "invalid" — its row is
+    // gone, so its route goes. That rule turns a BAD PANEL READ into a mass
+    // deletion: an empty key listing makes every selection invalid and removes
+    // every route. Refuse to work on an empty listing instead.
+    if (keyRows.length === 0 && selectedKeys.length > 0) {
+      throw new Sub2apiSyncError(
+        'sub2api-sync: 面板返回了 0 把 key，但本地仍勾选了 ' + String(selectedKeys.length) + ' 把——疑似面板读取异常，已中止本次同步（不改动任何路由）；请稍后重试，或到面板确认这些 key 是否还在',
+      )
     }
 
-    // The diff/retry loop: every conflict re-reads the current section and
-    // recomputes the ops against it; `desired` is conflict-independent. The
-    // plan rebuild rides the shared mutate helper's per-attempt `buildOps`.
+    // Phase 2 — discovery, bounded fan-out. Every key needs its own
+    // `/v1/models` answer (a key's permissions decide what it sees), but the
+    // keys are independent, so they overlap instead of queueing. The report
+    // keeps the selection's order: results land in an index-keyed array.
+    const targets = resolveTargets(effective, keyRows)
+    const discoveryTotal = targets.reduce((count, target) => count + ('invalid' in target ? 0 : 1), 0)
+    this.progressValue = { step: 'models', done: 0, total: discoveryTotal, startedAt }
+    const discoveryStartedAt = this.now()
+    let discovered = 0
+    const outcomes = await mapWithConcurrency(targets, this.discoveryConcurrency, async (target): Promise<KeyOutcome> => {
+      try {
+        if ('invalid' in target) {
+          return { groupId: target.invalid, route: `${target.invalid}`, action: 'failed', error: target.error, invalid: true }
+        }
+        const key = target.key
+        const route = routeForKey(instance, key.id)
+        try {
+          const group = groupById.get(key.groupId)
+          if (group === undefined) {
+            throw new Sub2apiSyncError(`key #${key.id}（${key.name}）的分组 ${key.groupId} 在面板不可用`)
+          }
+          const { profile, warnings: profileWarnings } = await this.buildKeyProfile(config, key, group, instance, modelIndex, site)
+          return {
+            groupId: group.id,
+            route,
+            keyId: key.id,
+            displayName: profile.displayName,
+            action: 'unchanged',
+            models: profile.models?.length ?? 0,
+            desired: profile,
+            profileWarnings,
+          }
+        } catch (error) {
+          return { groupId: key.groupId, route, keyId: key.id, action: 'failed', error: messageOf(error) }
+        }
+      } finally {
+        discovered++
+        this.progressValue = { step: 'models', done: discovered, total: discoveryTotal, startedAt }
+      }
+    })
+    const discoveryMs = this.now() - discoveryStartedAt
+    /**
+     * Routes whose key is STILL SELECTED but failed this run. Their existing
+     * provider stays untouched: a transient discovery/auth failure must never
+     * delete a working route (that turned one flaky sync into "my whole setup
+     * vanished"). Only keys DROPPED from the selection — or ids the panel no
+     * longer serves — are removable.
+     */
+    const keepRoutes = new Set<string>()
+    /**
+     * An EMPTY selection is never a removal instruction. The card disables its
+     * sync buttons at zero selected keys, so an empty run means a stale/absent
+     * selection reached the host — and removing every route (plus its
+     * credential and the route→id map) on that signal is how a glitch turned
+     * into "my whole setup vanished". Removal stays the job of an explicit
+     * uncheck (a narrower, non-empty selection) or of logout/reset.
+     */
+    const selectionIsEmpty = selectedKeys.length === 0
+    // A refresh never deletes: the routes it works on ARE the selection.
+    const refreshOnly = scope === 'registered'
+    for (const outcome of outcomes) {
+      const { desired: profile, profileWarnings, ...entry } = outcome
+      if (profile !== undefined) desired.set(entry.route, profile)
+      if (profileWarnings !== undefined) syncWarnings.push(...profileWarnings)
+      if (entry.action === 'failed' && entry.invalid !== true) keepRoutes.add(entry.route)
+      entries.push(entry)
+    }
+
+    // Phase 3 — the writes. The diff/retry loop: every conflict re-reads the
+    // current section and recomputes the ops against it; `desired` is
+    // conflict-independent. The plan rebuild rides the shared mutate helper's
+    // per-attempt `buildOps`.
+    this.progressValue = { step: 'write', done: 0, total: 1, startedAt }
+    const writeStartedAt = this.now()
     let attempts = 0
     const removed: string[] = []
     let ops: SettingsPathOp[] = []
@@ -302,7 +464,7 @@ export class Sub2apiSyncEngine {
     await mutateWithRetry(this.settings, PI_AI_NS, () => {
       attempts++
       const now = this.readCurrentProviders()
-      const plan = planOps(now, desired)
+      const plan = planOps(now, desired, keepRoutes, selectionIsEmpty || refreshOnly)
       ops = plan.ops
       routeActions = plan.actions
       removed.length = 0
@@ -315,6 +477,29 @@ export class Sub2apiSyncEngine {
     for (const entry of entries) {
       const action = routeActions.get(entry.route)
       if (action !== undefined) entry.action = action
+    }
+    for (const entry of entries) {
+      if (entry.action !== 'failed' || !keepRoutes.has(entry.route)) continue
+      syncWarnings.push(`key #${entry.keyId ?? '?'} 同步失败，已保留上次写入的路由 ${entry.route}（本次未改动）——修好原因后再同步即可`)
+    }
+    // Nothing was selected: say so, or the "0 个 key" report looks like a
+    // successful sync that mysteriously changed nothing.
+    if (selectionIsEmpty) {
+      const kept = this.readCurrentProviders()
+      const owned = Object.keys(kept).filter((route) => isOwnedRoute(route)).length
+      syncWarnings.push(owned > 0
+        ? `本次没有选中任何 key——为防误删，已保留现有的 ${String(owned)} 条路由（取消勾选某个 key 才会移除它的路由）`
+        : '本次没有选中任何 key——未做任何改动')
+    }
+    // Did the commit actually land? A host-side plugin reload can drop the
+    // write between the mutate and the read-back; reporting that is the
+    // difference between "sync said OK" and "the routes are really there".
+    if (desired.size > 0) {
+      const landed = this.readCurrentProviders()
+      const missing = [...desired.keys()].filter((route) => landed[route] === undefined)
+      if (missing.length > 0) {
+        syncWarnings.push(`写入未落地：${String(missing.length)} 条路由不在设置里（插件可能刚被宿主重载）——请再同步一次；本次不会删除任何已有路由`)
+      }
     }
 
     // Deletion semantics: a route dropped from the selection loses its entry
@@ -342,17 +527,20 @@ export class Sub2apiSyncEngine {
 
     // Persist the route → key id map in this plugin's own section: slugs
     // deliberately hide the numeric id, and the card's per-route remove
-    // button needs it without a panel round trip. Best effort — a failed
-    // write only costs the remove button until the next sync.
+    // button needs it without a panel round trip. Only MOVED entries are
+    // written — an unchanged map must not cost a second commit (each commit
+    // bumps the section revision and wakes every volatile listener). Best
+    // effort: a failed write only costs the remove button until the next sync.
     try {
+      const currentMap = this.readOwnRouteKeyIds()
       const mapOps: SettingsPathOp[] = []
       for (const entry of entries) {
-        if (entry.keyId !== undefined && entry.action !== 'failed') {
+        if (entry.keyId !== undefined && entry.action !== 'failed' && currentMap[entry.route] !== entry.keyId) {
           mapOps.push({ op: 'set', path: ['routeKeyIds', entry.route], value: entry.keyId })
         }
       }
       for (const route of removed) {
-        mapOps.push({ op: 'unset', path: ['routeKeyIds', route] })
+        if (route in currentMap) mapOps.push({ op: 'unset', path: ['routeKeyIds', route] })
       }
       if (mapOps.length > 0) {
         await mutateWithRetry(this.settings, OWN_NS, () => mapOps, {
@@ -363,7 +551,82 @@ export class Sub2apiSyncEngine {
       // Non-fatal: the next successful sync rewrites the map.
     }
 
-    return { entries, removed, writes: ops.length, attempts, warnings }
+    return {
+      entries,
+      removed,
+      writes: ops.length,
+      attempts,
+      warnings,
+      timing: {
+        panelMs,
+        catalogMs,
+        discoveryMs,
+        writeMs: this.now() - writeStartedAt,
+        totalMs: this.now() - startedAt,
+      },
+    }
+  }
+
+  /**
+   * Groups + the bounded key page walk. The group map and the FIRST key page
+   * are independent, so they overlap; further pages stay sequential (the walk
+   * stops when the panel says so). The panel gates everything: a signed-out
+   * session fails loud here.
+   */
+  private async readPanel(): Promise<{ groups: PanelGroup[]; keyRows: PanelKey[]; truncated: boolean }> {
+    return this.gateway.use(async (panel, token) => {
+      const groupsPromise = panel.listAvailableGroups(token)
+      // The 401-retry path re-runs this closure; a rejection from the FIRST
+      // attempt's sibling call would otherwise surface as an unhandled
+      // rejection (Node kills the process on those). Observe it here; the
+      // real error still propagates from whichever call is awaited.
+      groupsPromise.catch(() => undefined)
+      const first = await panel.listKeys(token, { page: 1, pageSize: KEY_WALK_PAGE_SIZE })
+      const groups = await groupsPromise
+      const rows = [...first.items]
+      const walkTo = Math.min(first.pages, KEY_WALK_MAX_PAGES)
+      for (let page = 2; page <= walkTo; page++) {
+        const result = await panel.listKeys(token, { page, pageSize: KEY_WALK_PAGE_SIZE })
+        rows.push(...result.items)
+        if (result.items.length === 0) break
+      }
+      // A panel reporting more pages than the walk visits means the sync only
+      // saw a prefix of the key list — surfaced as a report warning by the
+      // caller instead of silently dropping the tail keys.
+      return { groups, keyRows: rows, truncated: first.pages > KEY_WALK_MAX_PAGES }
+    })
+  }
+
+  /**
+   * The panel key ids behind the routes this plugin already registered. Reads
+   * the live provider section plus its own route→keyId map (legacy digit
+   * routes carry their id in the route name). A route with no recoverable id
+   * is simply skipped — a refresh must never delete what it cannot resolve,
+   * and `refreshOnly` keeps the removal plan empty anyway.
+   */
+  registeredKeyIds(): number[] {
+    const providers = this.readCurrentProviders()
+    const map = this.readOwnRouteKeyIds()
+    const ids: number[] = []
+    for (const route of Object.keys(providers)) {
+      if (!isOwnedRoute(route)) continue
+      const mapped = map[route]
+      if (mapped !== undefined) {
+        ids.push(mapped)
+        continue
+      }
+      const legacy = legacyKeyIdOfRoute(route)
+      if (legacy !== undefined) ids.push(legacy)
+    }
+    return [...new Set(ids)]
+  }
+
+  /** This plugin's own route→keyId map (empty when the section is cold). */
+  private readOwnRouteKeyIds(): Record<string, number> {
+    const descriptor = this.settings.describe().find((candidate) => candidate.ns === OWN_NS)
+    const value = (descriptor?.value as { routeKeyIds?: unknown } | undefined)?.routeKeyIds
+    if (value === null || value === undefined || typeof value !== 'object' || Array.isArray(value)) return {}
+    return value as Record<string, number>
   }
 
   /** Protocol + models + naming for one selected key; the plaintext comes
@@ -535,6 +798,12 @@ export class Sub2apiSyncEngine {
    * user's explicit selection from the card picker and wins outright (no
    * fetch — the entry contains exactly the chosen ids). Otherwise discover
    * via `/v1/models`; discovery failure falls back to the overrides loudly.
+   *
+   * Discovery answers are cached for `discoveryCacheSeconds` (default
+   * {@link DEFAULT_DISCOVERY_CACHE_SECONDS}s, `0` = always re-query): the same
+   * key re-synced minutes later — the scheduled resync, a second click, two
+   * windows — skips the round trip. The cache key is a digest of instance +
+   * group + plaintext, so the secret itself never becomes a map key.
    */
   private async discoverModels(
     config: Sub2apiSyncConfig,
@@ -544,14 +813,50 @@ export class Sub2apiSyncEngine {
   ): Promise<GatewayModelEntry[]> {
     const selection = config.modelListOverrides?.[String(groupId)] ?? []
     if (selection.length > 0) return selection.map((id) => ({ id }))
+    const ttlMs = Math.max(0, config.discoveryCacheSeconds ?? DEFAULT_DISCOVERY_CACHE_SECONDS) * 1000
+    const cacheKey = ttlMs > 0 ? discoveryCacheKey(instance, groupId, relayKey) : undefined
+    if (cacheKey !== undefined) {
+      const hit = this.discoveryCache.get(cacheKey)
+      if (hit !== undefined && this.now() - hit.at < ttlMs) {
+        return hit.models.map((model) => ({ ...model }))
+      }
+      if (hit !== undefined) this.discoveryCache.delete(cacheKey)
+    }
     try {
-      const client = new Sub2apiClient({ baseURL: instance, fetchImpl: this.fetchImpl })
-      return await client.listModels(relayKey)
+      const models = await this.listModelsWithRetry(instance, relayKey)
+      if (cacheKey !== undefined) {
+        // Keep the map from growing without bound across long sessions.
+        if (this.discoveryCache.size >= DISCOVERY_CACHE_MAX_ENTRIES) this.discoveryCache.clear()
+        this.discoveryCache.set(cacheKey, { models, at: this.now() })
+      }
+      return models
     } catch (error) {
       throw new Sub2apiSyncError(
         `分组 ${groupId} 模型发现失败：${messageOf(error)}；且未配置 modelListOverrides 兜底`,
       )
     }
+  }
+
+  /**
+   * One `/v1/models` call, retried ONCE when the relay answers 429: bounded
+   * concurrency must not turn a working sync into a failed one just because a
+   * relay meters per-key requests. Every other failure propagates unchanged
+   * (the 401 self-heal in `buildKeyProfile` matches on the message).
+   */
+  private async listModelsWithRetry(instance: string, relayKey: string): Promise<GatewayModelEntry[]> {
+    const client = new Sub2apiClient({ baseURL: instance, fetchImpl: this.fetchImpl })
+    let lastError: unknown
+    for (let attempt = 0; attempt <= DISCOVERY_RETRY_ATTEMPTS; attempt++) {
+      try {
+        return await client.listModels(relayKey)
+      } catch (error) {
+        lastError = error
+        const retryable = /HTTP 429(?![0-9])|超时（/.test(messageOf(error))
+        if (!retryable || attempt === DISCOVERY_RETRY_ATTEMPTS) throw error
+        await new Promise((resolve) => { setTimeout(resolve, DISCOVERY_RETRY_DELAY_MS * (attempt + 1)) })
+      }
+    }
+    throw lastError
   }
 
   private readCurrentProviders(): Record<string, PiAiProviderProfile> {
@@ -589,10 +894,16 @@ function protocolForPlatformWithOverride(platform: string, override: ApiProtocol
   return override ?? protocolForPlatform(platform)
 }
 
-/** Pure diff of one current/desired snapshot → ops plus per-route actions. */
+/**
+ * Pure diff of one current/desired snapshot → ops plus per-route actions.
+ * `keep` names owned routes that must survive this run even though they are
+ * not in `desired`: the key is still selected, it just failed this time.
+ */
 function planOps(
   current: Record<string, PiAiProviderProfile>,
   desired: Map<string, PiAiProviderProfile>,
+  keep: ReadonlySet<string> = new Set(),
+  keepAll = false,
 ): { ops: SettingsPathOp[]; actions: Map<string, SyncAction> } {
   const ops: SettingsPathOp[] = []
   const actions = new Map<string, SyncAction>()
@@ -613,11 +924,41 @@ function planOps(
       } else {
         actions.set(route, 'unchanged')
       }
-    } else if (isOwnedRoute(route)) {
+    } else if (isOwnedRoute(route) && !keepAll && !keep.has(route)) {
       ops.push({ op: 'unset', path: ['providers', route] })
       actions.set(route, 'unchanged') // removal is reported via `removed`, not per-entry
     }
     // Non-owned routes are never touched — that is the ownership boundary.
   }
   return { ops, actions }
+}
+
+/**
+ * Bounded fan-out: at most `limit` workers run at once, results land in input
+ * order. The worker is expected to swallow its own failures (the sync reports
+ * per-key errors rather than aborting the run) — an escaping rejection still
+ * propagates, it just stops the remaining queue.
+ */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  if (items.length === 0) return results
+  let next = 0
+  const size = Math.max(1, Math.min(limit, items.length))
+  await Promise.all(Array.from({ length: size }, async () => {
+    for (;;) {
+      const index = next++
+      if (index >= items.length) return
+      results[index] = await worker(items[index], index)
+    }
+  }))
+  return results
+}
+
+/** Digest of one discovery target — instance + group + plaintext, never the secret itself. */
+function discoveryCacheKey(instance: string, groupId: number, relayKey: string): string {
+  return createHash('sha256').update(`${instance}\u0000${groupId}\u0000${relayKey}`).digest('hex').slice(0, 32)
 }

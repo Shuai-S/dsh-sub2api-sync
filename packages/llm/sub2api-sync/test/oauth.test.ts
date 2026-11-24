@@ -14,10 +14,14 @@ import {
   callbackPageHtml,
   createPkcePair,
   discoverOAuthEndpoints,
+  ensureAuthorizeAccepted,
   exchangeAuthorizationCode,
+  isLoopbackRedirectUri,
   loopbackCallbackOrigin,
   oauthScopesFor,
+  probeAuthorize,
   refreshAccessToken,
+  resetAuthorizeProbeCache,
   resetDiscoveryCache,
   resolveCallbackOrigin,
   type OAuthEndpoints,
@@ -32,6 +36,7 @@ const ENDPOINTS: OAuthEndpoints = {
 
 afterEach(() => {
   resetDiscoveryCache()
+  resetAuthorizeProbeCache()
 })
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -377,6 +382,165 @@ describe('callbackPageHtml', () => {
     expect(html).toContain('授权被拒绝（&#60;script&#62;alert(1)&#60;/script&#62;）')
     expect(html).not.toContain('s2s-back')
     expect(html).toContain('window.close()')
+  })
+})
+
+describe('loopback alias normalization', () => {
+  it('presents the 127.0.0.1 literal for a localhost origin (instances register the literal)', () => {
+    expect(loopbackCallbackOrigin('http://localhost:3079'))
+      .toBe('http://127.0.0.1:3079/plugins/dsh-sub2api-sync/oauth/callback')
+    expect(resolveCallbackOrigin({ clientOrigin: 'http://localhost:3079', requestOrigin: 'http://127.0.0.1:1' }))
+      .toBe('http://127.0.0.1:3079/plugins/dsh-sub2api-sync/oauth/callback')
+    expect(resolveCallbackOrigin({ override: 'http://localhost:8080', requestOrigin: 'http://127.0.0.1:1' }))
+      .toBe('http://127.0.0.1:8080/plugins/dsh-sub2api-sync/oauth/callback')
+    // The IPv6 literal keeps its own spelling: providers register it as-is.
+    expect(loopbackCallbackOrigin('http://[::1]:3079'))
+      .toBe('http://[::1]:3079/plugins/dsh-sub2api-sync/oauth/callback')
+  })
+
+  it('classifies only the http loopback forms as self-registering callbacks', () => {
+    expect(isLoopbackRedirectUri('http://127.0.0.1:3079/plugins/dsh-sub2api-sync/oauth/callback')).toBe(true)
+    expect(isLoopbackRedirectUri('http://[::1]:3079/x')).toBe(true)
+    expect(isLoopbackRedirectUri('http://localhost:3079/x')).toBe(true)
+    expect(isLoopbackRedirectUri('https://127.0.0.1:3079/x')).toBe(false)
+    expect(isLoopbackRedirectUri('http://10.10.10.20:3079/x')).toBe(false)
+    expect(isLoopbackRedirectUri('http://127.0.0.2:3079/x')).toBe(false)
+    expect(isLoopbackRedirectUri('garbage')).toBe(false)
+  })
+})
+
+describe('probeAuthorize', () => {
+  const INPUT = {
+    redirectUri: 'http://10.10.10.20:3079/plugins/dsh-sub2api-sync/oauth/callback',
+    scope: 'openid profile groups:read keys:read keys:create',
+    state: 'st-1',
+    challenge: 'ch-1',
+  }
+
+  it('treats the redirect to the consent page as accepted, without following it', async () => {
+    let init: RequestInit | undefined
+    let requested = ''
+    const fetchImpl = (async (input: string | URL | Request, options?: RequestInit) => {
+      requested = String(input)
+      init = options
+      return new Response(null, { status: 302, headers: { location: 'http://panel:9000/oauth/authorize?transaction_id=x' } })
+    }) as typeof fetch
+    expect(await probeAuthorize(ENDPOINTS, INPUT, fetchImpl)).toBeUndefined()
+    expect(init?.redirect).toBe('manual')
+    const url = new URL(requested)
+    expect(url.searchParams.get('redirect_uri')).toBe(INPUT.redirectUri)
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256')
+  })
+
+  it('carries the provider code and description on a refusal', async () => {
+    const fetchImpl = (async () => jsonResponse(400, {
+      error: 'invalid_request',
+      error_description: 'Invalid OAuth authorization request',
+    })) as typeof fetch
+    expect(await probeAuthorize(ENDPOINTS, INPUT, fetchImpl)).toEqual({
+      code: 'invalid_request',
+      description: 'Invalid OAuth authorization request',
+    })
+  })
+
+  it('falls back to a status-derived code on a non-JSON refusal', async () => {
+    const fetchImpl = (async () => new Response('<!doctype html><html></html>', {
+      status: 403,
+      headers: { 'content-type': 'text/html' },
+    })) as typeof fetch
+    expect(await probeAuthorize(ENDPOINTS, INPUT, fetchImpl)).toEqual({ code: 'http_403' })
+  })
+
+  it('fails open on transport errors and provider-side faults', async () => {
+    const unreachable = (async () => { throw new Error('ECONNREFUSED') }) as typeof fetch
+    expect(await probeAuthorize(ENDPOINTS, INPUT, unreachable)).toBeUndefined()
+    const faulty = (async () => jsonResponse(503, { error: 'server_error' })) as typeof fetch
+    expect(await probeAuthorize(ENDPOINTS, INPUT, faulty)).toBeUndefined()
+  })
+})
+
+describe('ensureAuthorizeAccepted', () => {
+  const LAN_URI = 'http://10.10.10.20:3079/plugins/dsh-sub2api-sync/oauth/callback'
+  const LOOPBACK_PROBE = 'http://127.0.0.1/plugins/dsh-sub2api-sync/oauth/callback'
+
+  const guard = (redirectUri: string) => ({
+    instance: 'http://panel:9000',
+    endpoints: ENDPOINTS,
+    redirectUri,
+    scope: 'openid profile groups:read keys:read keys:create',
+    challenge: 'ch-1',
+  })
+
+  /** A fetch fake routing on the request's own redirect_uri parameter. */
+  function routed(handlers: Record<string, () => Response>) {
+    const seen: string[] = []
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const redirect = new URL(String(input)).searchParams.get('redirect_uri') ?? ''
+      seen.push(redirect)
+      const handler = handlers[redirect]
+      return handler !== undefined ? handler() : jsonResponse(400, { error: 'invalid_request' })
+    }) as typeof fetch
+    return { seen, fetchImpl }
+  }
+
+  it('never probes a loopback callback', async () => {
+    const { seen, fetchImpl } = routed({})
+    await ensureAuthorizeAccepted(guard('http://127.0.0.1:3079/plugins/dsh-sub2api-sync/oauth/callback'), fetchImpl)
+    expect(seen).toEqual([])
+  })
+
+  it('attributes a refusal to the unregistered origin and names both ways out', async () => {
+    const { seen, fetchImpl } = routed({
+      [LAN_URI]: () => jsonResponse(400, {
+        error: 'invalid_request',
+        error_description: 'Invalid OAuth authorization request',
+      }),
+      [LOOPBACK_PROBE]: () => new Response(null, { status: 302 }),
+    })
+    const failure = await ensureAuthorizeAccepted(guard(LAN_URI), fetchImpl).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(OAuthError)
+    expect((failure as OAuthError).code).toBe('invalid_request')
+    const message = (failure as Error).message
+    expect(message).toContain(LAN_URI)
+    expect(message).toContain('Invalid OAuth authorization request')
+    // The remedy names the loopback entry point and the server-side registration.
+    expect(message).toContain('回环地址可用')
+    expect(message).toContain('ssh -N -L')
+    expect(message).toContain('redirect_uris')
+    // The differential probe asked the provider about the canonical loopback form.
+    expect(seen).toEqual([LAN_URI, LOOPBACK_PROBE])
+  })
+
+  it('reports the request-side cause when loopback is refused too', async () => {
+    const { fetchImpl } = routed({})
+    const failure = await ensureAuthorizeAccepted(guard(LAN_URI), fetchImpl).catch((error: unknown) => error)
+    const message = (failure as Error).message
+    expect(message).toContain('scope')
+    expect(message).not.toContain('回环地址可用')
+  })
+
+  it('lets an accepted origin through, then serves the verdict from the cache', async () => {
+    const { seen, fetchImpl } = routed({ [LAN_URI]: () => new Response(null, { status: 302 }) })
+    await ensureAuthorizeAccepted(guard(LAN_URI), fetchImpl, 1_000)
+    await ensureAuthorizeAccepted(guard(LAN_URI), fetchImpl, 2_000)
+    expect(seen).toEqual([LAN_URI])
+  })
+
+  it('re-probes once the rejection verdict expires', async () => {
+    const { seen, fetchImpl } = routed({
+      [LAN_URI]: () => jsonResponse(400, { error: 'invalid_request' }),
+      [LOOPBACK_PROBE]: () => new Response(null, { status: 302 }),
+    })
+    await expect(ensureAuthorizeAccepted(guard(LAN_URI), fetchImpl, 1_000)).rejects.toThrowError(OAuthError)
+    await expect(ensureAuthorizeAccepted(guard(LAN_URI), fetchImpl, 2_000)).rejects.toThrowError(OAuthError)
+    expect(seen).toEqual([LAN_URI, LOOPBACK_PROBE])
+    await expect(ensureAuthorizeAccepted(guard(LAN_URI), fetchImpl, 62_000)).rejects.toThrowError(OAuthError)
+    expect(seen).toEqual([LAN_URI, LOOPBACK_PROBE, LAN_URI, LOOPBACK_PROBE])
+  })
+
+  it('fails open when the provider cannot be probed at all', async () => {
+    const unreachable = (async () => { throw new Error('network down') }) as typeof fetch
+    await expect(ensureAuthorizeAccepted(guard(LAN_URI), unreachable)).resolves.toBeUndefined()
   })
 })
 

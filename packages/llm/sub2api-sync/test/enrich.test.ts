@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bundledIndex, displayNameOf, loadModelIndex, parseCatalog, parseSnapshot, resetCaches } from '../src/enrich.ts'
+import { bundledIndex, displayNameOf, loadModelIndex, modelIndexForSync, parseCatalog, parseSnapshot, peekModelIndex, refreshModelIndex, resetCaches, resolveCapacityFact } from '../src/enrich.ts'
 
 const SNAPSHOT = JSON.stringify({
   generatedAt: '2026-09-30',
@@ -67,15 +67,53 @@ describe('parseSnapshot', () => {
 })
 
 describe('parseCatalog', () => {
-  it('merges cross-provider duplicates with max/OR semantics', () => {
+  it('resolves cross-provider duplicates by capacity policy, ORs the flags', () => {
     const index = parseCatalog(CATALOG)
+    // Both providers here are first-party (anthropic, openai); the vendor's own
+    // numbers, not the optimistic duplicate, decide (200000 / 64000).
+    // Both duplicates are first-party providers here (anthropic + openai), so
+    // there is no "vendor" to prefer between them: the contract resolves the
+    // disagreement conservatively (lower median) while ORing the flags.
     expect(index.get('claude-x')).toEqual({
-      contextWindow: 1000000, // max(200000, 1000000)
-      maxTokens: 64000, // max(64000, 32000)
+      contextWindow: 200000,
+      maxTokens: 32000,
       imageInput: true,
       reasoningModel: true,
     })
     expect(index.get('gpt-4o')).toEqual({ contextWindow: 128000, maxTokens: 16384, imageInput: true })
+  })
+
+  it('never lets one optimistic aggregator inflate a route', () => {
+    const index = parseCatalog({
+      // No first-party source: the lower median of the reported values wins.
+      'agg-a': { models: { 'm-one': { limit: { context: 1000000, output: 128000 } } } },
+      'agg-b': { models: { 'm-one': { limit: { context: 1000000, output: 128000 } } } },
+      'agg-c': { models: { 'm-one': { limit: { context: 1050000, output: 1050000 } } } },
+    })
+    expect(index.get('m-one')).toEqual({ contextWindow: 1000000, maxTokens: 128000 })
+
+    // Two-way disagreement: the conservative side wins, not the larger.
+    const pair = parseCatalog({
+      'agg-a': { models: { 'm-two': { limit: { output: 64000 } } } },
+      'agg-c': { models: { 'm-two': { limit: { output: 1048576 } } } },
+    })
+    expect(pair.get('m-two')).toEqual({ maxTokens: 64000 })
+  })
+
+  it('picks the first-party number over an aggregator majority', () => {
+    const index = parseCatalog({
+      anthropic: { models: { 'claude-y': { limit: { context: 200000, output: 64000 } } } },
+      'agg-a': { models: { 'claude-y': { limit: { context: 1000000, output: 1000000 } } } },
+      'agg-b': { models: { 'claude-y': { limit: { context: 1000000, output: 1000000 } } } },
+    })
+    expect(index.get('claude-y')).toEqual({ contextWindow: 200000, maxTokens: 64000 })
+  })
+
+  it('clamps the output budget to the context window', () => {
+    const index = parseCatalog({
+      'agg-a': { models: { 'm-three': { limit: { context: 32000, output: 64000 } } } },
+    })
+    expect(index.get('m-three')).toEqual({ contextWindow: 32000, maxTokens: 32000 })
   })
 
   it('returns an empty index for malformed catalogs', () => {
@@ -177,7 +215,7 @@ describe('parseCatalog display names', () => {
         },
       },
     })
-    expect(index.get('claude-x')).toEqual({ name: 'Claude X', contextWindow: 200000, imageInput: false, reasoningModel: false })
+    expect(index.get('claude-x')).toEqual({ name: 'Claude X', contextWindow: 200000 })
   })
 
   it('keeps a name as an id-only fact and rejects names equal to the id', () => {
@@ -298,5 +336,88 @@ describe('bundledIndex', () => {
     // First-party budget-only presence silences aggregator effort claims.
     expect(index.get('claude-sonnet-4-5')).not.toHaveProperty('reasoningEfforts')
     expect(index.get('gemini-2.5-pro')).not.toHaveProperty('reasoningEfforts')
+  })
+})
+describe('peekModelIndex / modelIndexForSync / refreshModelIndex', () => {
+  const catalogFetch = (): { fetchImpl: typeof fetch; calls: () => number } => {
+    let calls = 0
+    const fetchImpl = (async () => {
+      calls++
+      return { ok: true, status: 200, json: async () => CATALOG } as Response
+    }) as typeof fetch
+    return { fetchImpl, calls: () => calls }
+  }
+
+  it('peek answers only inside the TTL window and never fetches', async () => {
+    resetCaches()
+    expect(peekModelIndex(1000)).toBeUndefined()
+    const { fetchImpl, calls } = catalogFetch()
+    await loadModelIndex({ enrich: true, fetchImpl, now: () => 1000 })
+    expect(calls()).toBe(1)
+    expect(peekModelIndex(1000)?.get('gpt-4o')).toMatchObject({ contextWindow: 128000 })
+    expect(peekModelIndex(1000 + 23 * 60 * 60 * 1000)).toBeDefined()
+    expect(peekModelIndex(1000 + 25 * 60 * 60 * 1000)).toBeUndefined()
+    expect(calls()).toBe(1)
+    resetCaches()
+  })
+
+  it('modelIndexForSync answers from the bundled snapshot immediately and refreshes behind it', async () => {
+    resetCaches()
+    const { fetchImpl, calls } = catalogFetch()
+    // No await: the sync path must never wait on the 6.9 MB catalog.
+    const index = modelIndexForSync({ enrich: true, fetchImpl })
+    expect(index.get('claude-haiku-4-5')).toMatchObject({ contextWindow: 200000 })
+    expect(peekModelIndex()).toBeUndefined()
+    await new Promise((resolve) => { setTimeout(resolve, 20) })
+    expect(calls()).toBe(1)
+    // The NEXT run sees the fresh catalog.
+    expect(peekModelIndex()?.get('gpt-4o')).toMatchObject({ contextWindow: 128000 })
+    expect(modelIndexForSync({ enrich: true, fetchImpl })).toBe(peekModelIndex())
+    resetCaches()
+  })
+
+  it('does not start a refresh when enrichment is off', async () => {
+    resetCaches()
+    const { fetchImpl, calls } = catalogFetch()
+    const index = modelIndexForSync({ enrich: false, fetchImpl })
+    await new Promise((resolve) => { setTimeout(resolve, 10) })
+    expect(index.get('claude-haiku-4-5')).toMatchObject({ contextWindow: 200000 })
+    expect(calls()).toBe(0)
+    resetCaches()
+  })
+
+  it('a live cache entry satisfies a speculative refresh without a second download', async () => {
+    resetCaches()
+    const { fetchImpl, calls } = catalogFetch()
+    // Both calls on the REAL clock: an injected clock would look ancient
+    // against the entry the first call stamped, which is a test artefact.
+    await refreshModelIndex({ fetchImpl })
+    expect(calls()).toBe(1)
+    await refreshModelIndex({ fetchImpl })
+    expect(calls()).toBe(1)
+    resetCaches()
+  })
+
+  it('caps a stalled catalog fetch and negative-caches the bundled snapshot', async () => {
+    resetCaches()
+    const fetchImpl = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+      })
+    })) as typeof fetch
+    const index = await refreshModelIndex({ fetchImpl, timeoutMs: 5, now: () => 2000 })
+    expect(index.get('claude-haiku-4-5')).toMatchObject({ contextWindow: 200000 })
+    // Negative cache: the failure is remembered instead of retried per sync.
+    expect(peekModelIndex(2000 + 30 * 60 * 1000)?.get('claude-haiku-4-5')).toBeDefined()
+    resetCaches()
+  })
+})
+describe('resolveCapacityFact', () => {
+  it('prefers first-party values, else the lower median', () => {
+    expect(resolveCapacityFact([1000000, 1024, 128000])).toBe(128000)
+    expect(resolveCapacityFact([128000, 128000, 1050000])).toBe(128000)
+    expect(resolveCapacityFact([64000, 1050000])).toBe(64000)
+    expect(resolveCapacityFact([1000000, 200000], [200000])).toBe(200000)
+    expect(resolveCapacityFact([], [])).toBeUndefined()
   })
 })

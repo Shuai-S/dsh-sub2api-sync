@@ -93,9 +93,14 @@ export type LoginOutcome =
   | { kind: '2fa'; tempToken: string }
   | { kind: 'captcha'; message: string }
 
+/** Hard cap on one panel call: a hung socket must surface as an error, not a spinning sync. */
+export const PANEL_TIMEOUT_MS = 10_000
+
 export interface PanelClientOptions {
   baseURL: string
   fetchImpl?: typeof fetch
+  /** Per-request cap override (default {@link PANEL_TIMEOUT_MS}); test knob. */
+  timeoutMs?: number
 }
 
 interface Envelope {
@@ -201,6 +206,7 @@ function readTokenPair(data: unknown): { accessToken: string; refreshToken?: str
 export class PanelClient {
   readonly baseURL: string
   private readonly fetchImpl: typeof fetch
+  private readonly timeoutMs: number
 
   constructor(options: PanelClientOptions) {
     const base = options.baseURL.trim().replace(/\/+$/, '')
@@ -209,21 +215,34 @@ export class PanelClient {
     const fetchImpl = options.fetchImpl ?? globalThis.fetch
     if (fetchImpl === undefined) throw new Error('sub2api: 当前环境没有 fetch 可用')
     this.fetchImpl = fetchImpl.bind(globalThis)
+    this.timeoutMs = options.timeoutMs ?? PANEL_TIMEOUT_MS
   }
 
   private async call(token: string | undefined, method: string, path: string, body?: unknown): Promise<unknown> {
-    const response = await this.fetchImpl(`${this.baseURL}/api/v1${path}`, {
-      method,
-      headers: {
-        'content-type': 'application/json',
-        accept: 'application/json',
-        // Mirror the console web UI's marker: some deployments gate API paths
-        // on it, and it is harmless everywhere else.
-        'x-user-ui-request': '1',
-        ...(token !== undefined ? { authorization: `Bearer ${token}` } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    })
+    const timeout = AbortSignal.timeout(this.timeoutMs)
+    let response: Response
+    try {
+      response = await this.fetchImpl(`${this.baseURL}/api/v1${path}`, {
+        method,
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json',
+          // Mirror the console web UI's marker: some deployments gate API paths
+          // on it, and it is harmless everywhere else.
+          'x-user-ui-request': '1',
+          ...(token !== undefined ? { authorization: `Bearer ${token}` } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        signal: timeout,
+      })
+    } catch (error) {
+      // 408 keeps the classification honest (a timeout is not a 5xx) and the
+      // message names the cap, so the card can tell "slow instance" from "down".
+      if (timeout.aborted) {
+        throw new PanelError(408, `面板 ${method} ${path} 超时（${Math.round(this.timeoutMs / 1000)} 秒无响应）`)
+      }
+      throw error
+    }
     const payload = await readBody(response)
     if (!response.ok) {
       if (looksLikeCaptcha(response.status, payload)) {
@@ -477,6 +496,13 @@ export class PanelGateway {
    * Run one authed panel call. Tokens resolve per channel — OAuth access
    * token first, then the panel JWT — and a 401 triggers a single-flight
    * refresh (channel-appropriate) and exactly one retry before failing loud.
+   *
+   * Concurrency note (the sync fans out): every caller resolves the token up
+   * front, so a burst of calls that all 401 hands the SAME stale token to the
+   * refresh path. Rotating refresh tokens make a second refresh on that token
+   * a hard failure — and a refresh failure signs the session out and purges
+   * every synced route. Hence {@link adoptRefreshedToken}: if the store moved
+   * on while we were failing, use the winner's token instead of racing it.
    */
   async use<T>(fn: (panel: PanelClient, token: string) => Promise<T>): Promise<T> {
     const oauthAccess = await this.credentials.resolve(this.oauthAccessRef())
@@ -487,7 +513,9 @@ export class PanelGateway {
       } catch (error) {
         const status = error instanceof PanelError ? error.status : undefined
         if (status !== 401) throw error
-        const token = await this.refreshOAuthSingleFlight()
+        const adopted = await this.adoptRefreshedToken(this.oauthAccessRef(), oauthAccess.value)
+        if (adopted !== undefined) return await fn(panel, adopted)
+        const token = await this.refreshOAuthSingleFlight(oauthAccess.value)
         return await fn(panel, token)
       }
     }
@@ -501,7 +529,9 @@ export class PanelGateway {
     } catch (error) {
       const status = error instanceof PanelError ? error.status : undefined
       if (status !== 401) throw error
-      const token = await this.refreshSingleFlight()
+      const adopted = await this.adoptRefreshedToken(this.tokenRef(), access.value)
+      if (adopted !== undefined) return await fn(panel, adopted)
+      const token = await this.refreshSingleFlight(access.value)
       return await fn(panel, token)
     }
   }
@@ -533,17 +563,30 @@ export class PanelGateway {
     await this.credentials.unset(this.oauthRefresh())
   }
 
+  /**
+   * Did somebody else's refresh already land? Returns their token when the
+   * store's value differs from the stale one we failed with, so this caller
+   * retries instead of spending a rotated refresh token on a second attempt.
+   */
+  private async adoptRefreshedToken(ref: string, staleToken: string): Promise<string | undefined> {
+    const current = await this.credentials.resolve(ref)
+    if (current === undefined || current.value.length === 0 || current.value === staleToken) return undefined
+    return current.value
+  }
+
   /** Single-flight OAuth refresh (rotating); concurrent 401s share one wire call. */
-  private refreshOAuthSingleFlight(): Promise<string> {
-    this.oauthRefreshInFlight ??= this.refreshOAuth().finally(() => {
+  private refreshOAuthSingleFlight(staleAccess?: string): Promise<string> {
+    this.oauthRefreshInFlight ??= this.refreshOAuth(staleAccess).finally(() => {
       this.oauthRefreshInFlight = undefined
     })
     return this.oauthRefreshInFlight
   }
 
-  private async refreshOAuth(): Promise<string> {
+  private async refreshOAuth(staleAccess?: string): Promise<string> {
     const stored = await this.credentials.resolve(this.oauthRefresh())
     if (stored === undefined || stored.value.length === 0) {
+      const adopted = staleAccess !== undefined ? await this.adoptRefreshedToken(this.oauthAccessRef(), staleAccess) : undefined
+      if (adopted !== undefined) return adopted
       await this.credentials.unset(this.oauthAccessRef())
       this.onAuthLost?.()
       throw new Error('sub2api-sync: OAuth 登录已过期且无 refresh token——请重新进行网页授权')
@@ -554,6 +597,10 @@ export class PanelGateway {
       await this.storeOAuthTokens(pair)
       return pair.accessToken
     } catch (error) {
+      // Losing the race is not losing the session: only a refresh that failed
+      // against an UNCHANGED store is a definitive sign-out.
+      const adopted = staleAccess !== undefined ? await this.adoptRefreshedToken(this.oauthAccessRef(), staleAccess) : undefined
+      if (adopted !== undefined) return adopted
       await this.credentials.unset(this.oauthAccessRef())
       await this.credentials.unset(this.oauthRefresh())
       this.onAuthLost?.()
@@ -563,16 +610,18 @@ export class PanelGateway {
   }
 
   /** Single-flight refresh; concurrent 401s share one wire call. */
-  private refreshSingleFlight(): Promise<string> {
-    this.refreshInFlight ??= this.doRefresh().finally(() => {
+  private refreshSingleFlight(staleAccess?: string): Promise<string> {
+    this.refreshInFlight ??= this.doRefresh(staleAccess).finally(() => {
       this.refreshInFlight = undefined
     })
     return this.refreshInFlight
   }
 
-  private async doRefresh(): Promise<string> {
+  private async doRefresh(staleAccess?: string): Promise<string> {
     const stored = await this.credentials.resolve(this.refreshRef())
     if (stored === undefined || stored.value.length === 0) {
+      const adopted = staleAccess !== undefined ? await this.adoptRefreshedToken(this.tokenRef(), staleAccess) : undefined
+      if (adopted !== undefined) return adopted
       await this.credentials.unset(this.tokenRef())
       this.onAuthLost?.()
       throw new Error('sub2api-sync: 登录已过期且无 refresh token——请重新登录')
@@ -582,6 +631,10 @@ export class PanelGateway {
       await this.storeTokens(tokens.accessToken, tokens.refreshToken)
       return tokens.accessToken
     } catch (error) {
+      // Same race rule as the OAuth channel: a concurrent winner means this
+      // failure is moot — adopt its token instead of signing out.
+      const adopted = staleAccess !== undefined ? await this.adoptRefreshedToken(this.tokenRef(), staleAccess) : undefined
+      if (adopted !== undefined) return adopted
       await this.credentials.unset(this.tokenRef())
       await this.credentials.unset(this.refreshRef())
       this.onAuthLost?.()

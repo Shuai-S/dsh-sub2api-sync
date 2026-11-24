@@ -17,11 +17,16 @@ export function gatewayApiRoot(baseURL: string): string {
   return /\/v1$/i.test(cleaned) ? cleaned : `${cleaned}/v1`
 }
 
+/** Hard cap on one gateway call: a stalled relay must fail that one key, not the whole sync. */
+export const GATEWAY_TIMEOUT_MS = 20_000
+
 export interface Sub2apiClientOptions {
   /** sub2api instance address, with or without a trailing `/v1`. */
   baseURL: string
   /** Fetch implementation override (tests); defaults to globalThis.fetch. */
   fetchImpl?: typeof fetch
+  /** Per-request cap override (default {@link GATEWAY_TIMEOUT_MS}); test knob. */
+  timeoutMs?: number
 }
 
 /** One model entry as the gateway answers it — the shape varies per platform. */
@@ -33,6 +38,7 @@ export interface GatewayModelEntry {
 export class Sub2apiClient {
   private readonly root: string
   private readonly fetchImpl: typeof fetch
+  private readonly timeoutMs: number
 
   constructor(options: Sub2apiClientOptions) {
     const base = options.baseURL?.trim() ?? ''
@@ -41,6 +47,7 @@ export class Sub2apiClient {
     const fetchImpl = options.fetchImpl ?? globalThis.fetch
     if (fetchImpl === undefined) throw new Error('sub2api: 当前环境没有 fetch 可用')
     this.fetchImpl = fetchImpl.bind(globalThis)
+    this.timeoutMs = options.timeoutMs ?? GATEWAY_TIMEOUT_MS
   }
 
   /**
@@ -51,10 +58,22 @@ export class Sub2apiClient {
    * everything else (verified: `handler/gateway_handler.go`).
    */
   async listModels(relayKey: string, options?: { signal?: AbortSignal }): Promise<GatewayModelEntry[]> {
-    const response = await this.fetchImpl(`${this.root}/models`, {
-      headers: { authorization: `Bearer ${relayKey}` },
-      signal: options?.signal,
-    })
+    const timeout = AbortSignal.timeout(this.timeoutMs)
+    const signal = options?.signal !== undefined ? AbortSignal.any([options.signal, timeout]) : timeout
+    let response: Response
+    try {
+      response = await this.fetchImpl(`${this.root}/models`, {
+        headers: { authorization: `Bearer ${relayKey}` },
+        signal,
+      })
+    } catch (error) {
+      // A cap that fired must read as a timeout, not as a generic network error:
+      // "网关超时" and "网关拒绝" send the user to different fixes.
+      if (timeout.aborted) {
+        throw new Error(`sub2api 网关 GET ${this.root}/models 超时（${Math.round(this.timeoutMs / 1000)} 秒无响应）`)
+      }
+      throw error
+    }
     if (!response.ok) {
       throw new Error(`sub2api 网关 GET ${this.root}/models 返回 HTTP ${response.status}${await refusalDetail(response)}`)
     }

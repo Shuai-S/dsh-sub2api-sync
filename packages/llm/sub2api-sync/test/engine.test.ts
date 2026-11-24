@@ -373,27 +373,33 @@ describe('Sub2apiSyncEngine.sync', () => {
   })
 
   it('removes routes and credentials for keys that left the selection', async () => {
-    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS))
+    // "Left the selection" is expressed by selecting a DIFFERENT key, not by
+    // selecting nothing: an empty selection is explicitly a no-op (it must
+    // never delete routes — see the destructive-path guards).
+    const secondKey = { id: 6, name: 'Claude 备用', groupId: 1, key: 'sk-6' }
+    const secondRoute = routeForKey(INSTANCE, 6)
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], [...structuredClone(KEYS), secondKey])
     const { engine, settings, credentials } = makeEngine({
       fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }] }),
       gateway,
     })
     await engine.sync(config({ selectedKeys: [5] }))
-    const report = await engine.sync(config({ selectedKeys: [] }))
+    const report = await engine.sync(config({ selectedKeys: [6] }))
     expect(report.removed).toEqual([ROUTE])
-    expect(Object.keys(settings.providers)).toEqual([])
+    expect(Object.keys(settings.providers)).toEqual([secondRoute])
     expect(credentials.get(REF)).toBeUndefined()
   })
 
   it('revokes the remote key of a removed route via the slug reverse map', async () => {
-    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], structuredClone(KEYS))
+    const secondKey = { id: 6, name: 'Claude 备用', groupId: 1, key: 'sk-6' }
+    const gateway = new FakeGateway([structuredClone(CLAUDE_GROUP)], [...structuredClone(KEYS), secondKey])
     const { engine } = makeEngine({
       fetchImpl: fetchAnswering({ data: [{ id: 'claude-x' }] }),
       gateway,
     })
     await engine.sync(config({ selectedKeys: [5], deleteOrphanKeys: true }))
     expect(gateway.deletedIds).toEqual([])
-    await engine.sync(config({ selectedKeys: [], deleteOrphanKeys: true }))
+    await engine.sync(config({ selectedKeys: [6], deleteOrphanKeys: true }))
     expect(gateway.deletedIds).toEqual([5])
   })
 
@@ -689,7 +695,11 @@ describe('discovery 401 self-heal', () => {
 })
 
 describe('routeKeyIds map', () => {
-  const KEYS_FIXTURE = [{ id: 5, name: 'Claude 拼车', groupId: 1, key: 'sk-5' }]
+  const KEYS_FIXTURE = [
+    { id: 5, name: 'Claude 拼车', groupId: 1, key: 'sk-5' },
+    // The switch target: removal is expressed by selecting THIS key instead.
+    { id: 6, name: 'Claude 备用', groupId: 1, key: 'sk-6' },
+  ]
 
   it('records route → keyId on success and unsets it when the route is removed', async () => {
     const { engine, settings } = makeEngine({
@@ -700,8 +710,9 @@ describe('routeKeyIds map', () => {
     await engine.sync(config({ selectedKeys: [5] }))
     expect((settings.docs['sub2api-sync'] as Record<string, unknown>).routeKeyIds).toEqual({ [ROUTE]: 5 })
 
-    // Drop the key from the selection → route removed → map entry gone.
-    await engine.sync(config({ selectedKeys: [] }))
-    expect((settings.docs['sub2api-sync'] as Record<string, unknown>).routeKeyIds).toEqual({})
+    // Switching the selection removes the dropped route and its map entry.
+    const secondRoute = routeForKey(INSTANCE, 6)
+    await engine.sync(config({ selectedKeys: [6] }))
+    expect((settings.docs['sub2api-sync'] as Record<string, unknown>).routeKeyIds).toEqual({ [secondRoute]: 6 })
   })
 })

@@ -23,7 +23,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { SyncReport } from './engine.ts'
+import type { SyncProgress, SyncReport, SyncScope } from './engine.ts'
 import type { IconPayload } from './icon.ts'
 import type { AuthKind } from './panel.ts'
 import type { CallbackLang } from './oauth.ts'
@@ -109,6 +109,8 @@ export interface StatusResponse {
   auth: AuthView
   instance: string
   syncRunning: boolean
+  /** Live phase of the running sync (absent when idle) — the card's progress line. */
+  syncProgress?: SyncProgress
   routes: StatusRoute[]
   lastReport?: SyncReport
   /** Wall-clock ms of the last accepted sync (client renders it relatively). */
@@ -309,7 +311,12 @@ export interface RouteDeps {
    * rides the config's `selectedKeys`, not this response). */
   listGroups(): Promise<GroupsView[]>
   /** Run one sync; the implementation serializes and records the report. */
-  sync(keyIds?: number[]): Promise<SyncReport>
+  /**
+   * One sync run. `keyIds` overrides the persisted selection; `scope` decides
+   * what the run may touch — `selection` (default) is create/update/remove over
+   * the ticked keys, `registered` refreshes only the routes that already exist.
+   */
+  sync(keyIds?: number[], scope?: SyncScope): Promise<SyncReport>
   lastReport(): SyncReport | undefined
   lastReportAt(): number | undefined
   /** One page of the panel's keys (newest first; page is 1-based), optional
@@ -338,6 +345,8 @@ export interface RouteDeps {
    */
   removeSyncedKey(keyId: number): Promise<void>
   isSyncRunning(): boolean
+  /** Live phase of the running sync, when the engine reports one. */
+  syncProgress?(): SyncProgress | undefined
   /** Owned routes currently registered in the llm-pi-ai section. */
   ownedRoutes(): StatusRoute[]
   /** Whether the cross-device escape hatch is on (Config, default false). */
@@ -397,11 +406,13 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
       if (!guard(req, res)) return
       if (!method('GET', req, res)) return
       const auth = await deps.authState()
+      const syncProgress = deps.syncProgress?.()
       json(res, 200, {
         ok: true,
         auth,
         instance: deps.instance(),
         syncRunning: deps.isSyncRunning(),
+        ...(syncProgress !== undefined ? { syncProgress } : {}),
         routes: deps.ownedRoutes(),
         lastReport: deps.lastReport(),
         lastReportAt: deps.lastReportAt(),
@@ -412,9 +423,10 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
       if (!guard(req, res)) return
       if (!method('POST', req, res)) return
       try {
-        const body = await readJson(req).catch(() => ({}) as { keyIds?: unknown })
+        const body = await readJson(req).catch(() => ({}) as { keyIds?: unknown; scope?: unknown })
         const keyIds = Array.isArray(body.keyIds) ? body.keyIds.filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0) : undefined
-        const report = await deps.sync(keyIds)
+        const scope: SyncScope = body.scope === 'registered' ? 'registered' : 'selection'
+        const report = await deps.sync(keyIds, scope)
         json(res, 200, { ok: true, report } satisfies SyncResponse)
       } catch (error) {
         json(res, conflictStatus(error) ?? 500, { ok: false, error: safeMessage(error) })
@@ -489,7 +501,9 @@ export function registerRoutes(ctx: Context, deps: RouteDeps): void {
           const rawPage = Number(url.searchParams.get('page') ?? '1')
           const rawSize = Number(url.searchParams.get('pageSize') ?? '5')
           const page = Number.isSafeInteger(rawPage) && rawPage > 0 ? rawPage : 1
-          const pageSize = Number.isSafeInteger(rawSize) && rawSize > 0 ? Math.min(rawSize, 50) : 5
+          // The snapshot builder asks for big pages (it walks `pages` itself);
+          // 100 is the largest page the panel is trusted with.
+          const pageSize = Number.isSafeInteger(rawSize) && rawSize > 0 ? Math.min(rawSize, 100) : 5
           const rawSearch = (url.searchParams.get('search') ?? '').trim()
           const search = rawSearch.length > 0 ? rawSearch : undefined
           const result = await deps.listKeys(page, pageSize, search)

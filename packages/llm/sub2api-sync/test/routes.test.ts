@@ -564,3 +564,37 @@ describe('route lifecycle', () => {
     expect(table.size).toBe(Object.keys(ROUTES).length)
   })
 })
+describe('routes — live sync progress', () => {
+  it('projects the running phase and its per-key counter', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub({
+      syncProgress: () => ({ step: 'models', done: 2, total: 5, startedAt: 1_700_000_000_000 }),
+    }))
+    const { body } = await call(handlers, ROUTES.status)
+    const snapshot = body as unknown as StatusResponse
+    expect(snapshot.syncProgress).toEqual({ step: 'models', done: 2, total: 5, startedAt: 1_700_000_000_000 })
+  })
+
+  it('omits the field when the host reports no progress', async () => {
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub())
+    const { body } = await call(handlers, ROUTES.status)
+    expect('syncProgress' in (body as Record<string, unknown>)).toBe(false)
+  })
+})
+describe('routes — sync scope', () => {
+  it('passes the refresh scope through and defaults to the selection', async () => {
+    const seen: Array<{ keyIds: number[] | undefined; scope: string | undefined }> = []
+    const report = { entries: [], removed: [], writes: 0, attempts: 1, warnings: [] }
+    const { ctx, handlers } = fakeCtx()
+    registerRoutes(ctx, depsStub({
+      sync: async (keyIds, scope) => { seen.push({ keyIds, scope }); return report },
+    }))
+    await call(handlers, ROUTES.sync, { method: 'POST', body: { scope: 'registered' } })
+    await call(handlers, ROUTES.sync, { method: 'POST', body: {} })
+    expect(seen).toEqual([
+      { keyIds: undefined, scope: 'registered' },
+      { keyIds: undefined, scope: 'selection' },
+    ])
+  })
+})

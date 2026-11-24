@@ -184,7 +184,9 @@ export async function createPkcePair(): Promise<{ verifier: string; challenge: s
 
 /** The strict loopback-only fallback: the exact redirect URI for direct
  * desktop access (or a proxy that faithfully passes the loopback Host),
- * or a loud reason why this origin cannot host the callback. */
+ * or a loud reason why this origin cannot host the callback. `localhost` is
+ * the same resource as `127.0.0.1` (RFC 8252 §7.3) but is presented in the
+ * literal form — see {@link normalizeLoopbackAlias}. */
 export function loopbackCallbackOrigin(origin: string): string {
   let parsed: URL
   try {
@@ -192,14 +194,13 @@ export function loopbackCallbackOrigin(origin: string): string {
   } catch {
     throw new OAuthError('invalid_request', '无法解析回调地址 origin')
   }
-  const host = parsed.hostname.toLowerCase()
-  if (host !== '127.0.0.1' && host !== '::1' && host !== '[::1]') {
+  if (!isLoopbackHost(parsed.hostname)) {
     throw new OAuthError(
       'invalid_request',
-      `OAuth 回调只支持本机回环地址（127.0.0.1 / ::1），当前 origin 是 ${parsed.host} —— 请在本机页面上发起网页授权`,
+      `OAuth 回调只支持本机回环地址（127.0.0.1 / ::1 / localhost），当前 origin 是 ${parsed.host} —— 请在本机页面上发起网页授权`,
     )
   }
-  return `${parsed.protocol}//${parsed.host}${OAUTH_CALLBACK_PATH}`
+  return callbackUrlOf(parsed)
 }
 
 /** A well-formed http(s) origin (no path/query/hash), or null. */
@@ -216,7 +217,8 @@ function tryAsOrigin(value: string): URL | null {
 }
 
 function isLoopbackHost(host: string): boolean {
-  return host === '127.0.0.1' || host === '::1' || host === '[::1]'
+  const bare = host.replace(/^\[|\]$/g, '').toLowerCase()
+  return bare === '127.0.0.1' || bare === '::1' || bare === 'localhost'
 }
 
 /** RFC 1918 IPv4 ranges and IPv6 ULA (fc00::/7) — the LANs a home NAS serves. */
@@ -229,9 +231,38 @@ function isPrivateHost(host: string): boolean {
   return false
 }
 
+/**
+ * Some deployments register only the `127.0.0.1` literal and answer
+ * `invalid_request` for the `localhost` spelling of the same loopback
+ * resource (probed 2026-11-24 against a live instance: `localhost` → 400,
+ * `127.0.0.1` with any port → 302). The two names address one server, and the
+ * callback carries no cookies — only the one-shot `state` held by this host
+ * process — so normalizing the presented URI costs nothing and keeps a
+ * `http://localhost:<port>` GUI working. The port is preserved; `::1` is left
+ * alone (providers register it separately).
+ */
+function normalizeLoopbackAlias(parsed: URL): URL {
+  if (parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase() !== 'localhost') return parsed
+  const rewritten = new URL(parsed.toString())
+  rewritten.hostname = '127.0.0.1'
+  return rewritten
+}
+
 /** The callback URL for an already-validated origin. */
 function callbackUrlOf(parsed: URL): string {
-  return `${parsed.protocol}//${parsed.host}${OAUTH_CALLBACK_PATH}`
+  const normalized = normalizeLoopbackAlias(parsed)
+  return `${normalized.protocol}//${normalized.host}${OAUTH_CALLBACK_PATH}`
+}
+
+/** Whether a redirect URI is a callback the providers accept without any
+ * registration: the http loopback (127.0.0.1 / ::1 / localhost) form. */
+export function isLoopbackRedirectUri(uri: string): boolean {
+  try {
+    const parsed = new URL(uri)
+    return parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname)
+  } catch {
+    return false
+  }
 }
 
 /** Inputs for {@link resolveCallbackOrigin}. */
@@ -305,6 +336,161 @@ export function buildAuthorizeUrl(
   url.searchParams.set('code_challenge', input.challenge)
   url.searchParams.set('code_challenge_method', 'S256')
   return url.toString()
+}
+
+/** One provider-side refusal of an authorization request (RFC 6749 §4.1.2.1:
+ * an untrusted `redirect_uri` is never redirected to — the provider answers an
+ * error document instead, which is exactly what strands a browser tab). */
+export interface AuthorizeRejection {
+  code: string
+  description?: string
+}
+
+/**
+ * One no-follow authorization probe: a 2xx (inline consent page) or a 3xx
+ * (redirect to the provider's consent SPA) means the request was accepted; a
+ * 4xx means it was refused before consent. Transport failures and 5xx answer
+ * `undefined` — an outage must never block a flow that discovery just proved
+ * reachable (fail open on the unknowable, fail loud only on an explicit
+ * refusal).
+ *
+ * Cost: a provider may materialize a pending consent transaction for a probe.
+ * It is never completed and expires with the provider's own TTL, and
+ * {@link ensureAuthorizeAccepted} caches the verdict so a retry loop cannot
+ * accumulate them.
+ */
+export async function probeAuthorize(
+  endpoints: OAuthEndpoints,
+  input: { redirectUri: string; scope: string; state: string; challenge: string },
+  fetchImpl: typeof fetch = globalThis.fetch,
+): Promise<AuthorizeRejection | undefined> {
+  let response: Response
+  try {
+    response = await fetchImpl(buildAuthorizeUrl(endpoints, input), {
+      redirect: 'manual',
+      headers: { accept: 'application/json' },
+    })
+  } catch {
+    return undefined
+  }
+  const status = response.status
+  // 0 = an opaque redirect from a browser-shaped fetch; 2xx = inline consent.
+  if (status < 400) return undefined
+  if (status >= 500) return undefined
+  let code = `http_${status}`
+  let description: string | undefined
+  try {
+    const payload = await response.json() as Record<string, unknown>
+    if (typeof payload.error === 'string' && payload.error.length > 0) code = payload.error
+    if (typeof payload.error_description === 'string' && payload.error_description.length > 0) {
+      description = payload.error_description
+    }
+  } catch {
+    // Non-JSON error body (an HTML error page): keep the status-derived code.
+  }
+  return { code, ...(description !== undefined ? { description } : {}) }
+}
+
+interface ProbeVerdict {
+  rejection: AuthorizeRejection
+  /** Whether the canonical loopback form of the same callback was accepted —
+   * i.e. the refusal is about this origin, not the client/scope/PKCE. */
+  loopbackAccepted: boolean
+  at: number
+}
+
+const probeCache = new Map<string, ProbeVerdict | { accepted: true; at: number }>()
+const PROBE_ACCEPTED_TTL_MS = 5 * 60 * 1000
+const PROBE_REJECTED_TTL_MS = 60 * 1000
+
+/** Test seam: drop the process-wide authorize-probe cache. */
+export function resetAuthorizeProbeCache(): void {
+  probeCache.clear()
+}
+
+/** The loopback spelling of an arbitrary callback: providers match loopback
+ * without the port (RFC 8252 §7.3), so the portless literal is a valid probe. */
+function canonicalLoopbackUri(redirectUri: string): string | undefined {
+  try {
+    return `http://127.0.0.1${new URL(redirectUri).pathname}`
+  } catch {
+    return undefined
+  }
+}
+
+/** The dialog-facing explanation of one refusal: what the provider said, what
+ * it means for this callback, and the two ways out. */
+function authorizeRejectionMessage(
+  redirectUri: string,
+  verdict: { rejection: AuthorizeRejection; loopbackAccepted: boolean },
+): string {
+  const { code, description } = verdict.rejection
+  const detail = description !== undefined ? `（${description}）` : ''
+  const head = `sub2api 实例拒绝了本次网页授权（${code}）${detail}，回调地址：${redirectUri}。`
+  if (verdict.loopbackAccepted) {
+    return `${head}该实例只接受已登记的回调地址，回环地址可用：请改用 http://127.0.0.1:<端口> 打开本页面（跨设备可用 ssh -N -L <本地端口>:127.0.0.1:<端口> 隧道后再访问 http://127.0.0.1:<本地端口>），或在实例侧把该回调地址登记到 client ${OAUTH_CLIENT_ID} 的 redirect_uris，或在插件设置里用 oauthCallbackOrigin 显式指定实例已登记的 origin。`
+  }
+  return `${head}请确认实例地址填写正确、client ${OAUTH_CLIENT_ID} 已启用且允许本次 scope；若经局域网 IP、自建域名或 HTTPS 反代访问，需要先在实例侧登记该回调地址；本机回环访问（http://127.0.0.1:<端口>）始终可用。`
+}
+
+/** Inputs for {@link ensureAuthorizeAccepted}. */
+export interface AuthorizeGuardInput {
+  /** Instance address as configured; used as the verdict cache key. */
+  instance: string
+  endpoints: OAuthEndpoints
+  redirectUri: string
+  scope: string
+  challenge: string
+}
+
+/**
+ * Fail fast when the provider would refuse this authorization's `redirect_uri`.
+ *
+ * The browser half resolves the callback from where the GUI actually loads:
+ * loopback on a desktop, a private-network IP when the user opens the same GUI
+ * through the LAN. Deployments register the loopback callback only (the
+ * documented seed is `http://127.0.0.1/…`, design note §4), so a LAN-IP
+ * `redirect_uri` is refused *before* the consent page — and without this guard
+ * the failure lands nowhere: the new tab shows the provider's JSON error while
+ * the dialog polls a grant that can never arrive, until the attempt TTL
+ * expires.
+ *
+ * Loopback callbacks skip the probe (they are the accepted form and the
+ * overwhelmingly common case). A refusal is attributed by probing the
+ * canonical loopback form of the same callback once: accepted there means
+ * "this origin is not registered", refused there too means the request itself
+ * is wrong (client/scope/PKCE). The provider's own code rides the message
+ * either way.
+ */
+export async function ensureAuthorizeAccepted(
+  input: AuthorizeGuardInput,
+  fetchImpl: typeof fetch = globalThis.fetch,
+  now: number = Date.now(),
+): Promise<void> {
+  if (isLoopbackRedirectUri(input.redirectUri)) return
+  const key = `${input.instance.trim().replace(/\/+$/, '').toLowerCase()}|${input.redirectUri}`
+  const cached = probeCache.get(key)
+  if (cached !== undefined) {
+    const ttl = 'accepted' in cached ? PROBE_ACCEPTED_TTL_MS : PROBE_REJECTED_TTL_MS
+    if (now - cached.at < ttl) {
+      if ('accepted' in cached) return
+      throw new OAuthError(cached.rejection.code, authorizeRejectionMessage(input.redirectUri, cached))
+    }
+  }
+  // The probe's own state is a throwaway: only the attempt's state is ever
+  // bound to a verifier, and this request is never completed.
+  const common = { scope: input.scope, state: randomBase64url(16), challenge: input.challenge }
+  const rejection = await probeAuthorize(input.endpoints, { ...common, redirectUri: input.redirectUri }, fetchImpl)
+  if (rejection === undefined) {
+    probeCache.set(key, { accepted: true, at: now })
+    return
+  }
+  const fallback = canonicalLoopbackUri(input.redirectUri)
+  const loopbackAccepted = fallback !== undefined
+    && (await probeAuthorize(input.endpoints, { ...common, redirectUri: fallback }, fetchImpl)) === undefined
+  const verdict: ProbeVerdict = { rejection, loopbackAccepted, at: now }
+  probeCache.set(key, verdict)
+  throw new OAuthError(rejection.code, authorizeRejectionMessage(input.redirectUri, verdict))
 }
 
 export interface OAuthTokenPair {

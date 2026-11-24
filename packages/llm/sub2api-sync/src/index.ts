@@ -22,6 +22,7 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
 import { readConfig, validateConfig, type ResolvedSub2apiSyncConfig, type Sub2apiSyncConfig } from './config.ts'
 import { Sub2apiSyncEngine, OWN_NS, PI_AI_NS, createSyncReportStore } from './engine.ts'
+import { modelIndexForSync, refreshModelIndex } from './enrich.ts'
 import { createInstanceProbe } from './icon.ts'
 import {
   OAuthAttemptStore,
@@ -29,6 +30,7 @@ import {
   callbackPageHtml,
   createPkcePair,
   discoverOAuthEndpoints,
+  ensureAuthorizeAccepted,
   exchangeAuthorizationCode,
   oauthScopesFor,
   resetDiscoveryCache,
@@ -90,11 +92,17 @@ export {
   callbackPageHtml,
   createPkcePair,
   discoverOAuthEndpoints,
+  ensureAuthorizeAccepted,
   exchangeAuthorizationCode,
+  isLoopbackRedirectUri,
   loopbackCallbackOrigin,
   oauthScopesFor,
+  probeAuthorize,
   refreshAccessToken,
+  resetAuthorizeProbeCache,
   revokeToken,
+  type AuthorizeGuardInput,
+  type AuthorizeRejection,
   type CallbackLang,
 } from './oauth.ts'
 
@@ -166,10 +174,43 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
   }
 
   // The gateway re-reads baseURL per call: the card may edit the instance
-  // address between operations. Definitive auth loss (refresh refused) also
-  // purges the sync state per the logout/expiry policy.
-  const gateway = new PanelGateway({ baseURL: () => source().baseURL?.trim() ?? '', credentials, onAuthLost: () => void purgeSyncState().catch(() => undefined) })
-  const engine = new Sub2apiSyncEngine({ settings: ctx.settings, credentials, gateway, siteName: () => instanceProbe.siteName(instance()) })
+  // address between operations.
+  //
+  // Auth loss is NOT a reason to destroy configuration any more: the provider
+  // routes are plain settings that keep working on their relay keys, and a
+  // refresh hiccup (rotating tokens + concurrent callers) used to wipe every
+  // synced route because one 401 went unresolved. Re-authorizing restores the
+  // session; an explicit logout still purges (see deps.logout), and an
+  // instance switch still purges via resetSync. The only thing dropped here is
+  // the in-memory report, which describes a session that no longer exists.
+  const gateway = new PanelGateway({
+    baseURL: () => source().baseURL?.trim() ?? '',
+    credentials,
+    onAuthLost: () => {
+      reports.clear()
+      ctx.logger.warn('sub2api-sync: 面板授权已失效（路由与凭据保留）——重新登录/授权即可继续同步')
+    },
+  })
+  const engine = new Sub2apiSyncEngine({
+    settings: ctx.settings,
+    credentials,
+    gateway,
+    siteName: () => instanceProbe.siteName(instance()),
+    // Metadata comes from cache/snapshot; the 6.9 MB catalog refreshes off the
+    // sync's critical path (see `modelIndexForSync`). Before this wiring the
+    // download sat in front of every cold sync.
+    loadModelIndex: (options) => modelIndexForSync(options),
+  })
+
+  // Warm the models.dev catalog the moment the instance is configured: the
+  // refresh runs OFF the sync path, so the user's first sync (seconds later,
+  // realistically) already reads the fresh catalog instead of the bundled
+  // snapshot. Gated on a configured baseURL — an install that never syncs
+  // never downloads. `refreshModelIndex` is single-flight and cache-aware, so
+  // repeated calls (config writes, timer ticks) cost nothing.
+  if ((source().baseURL ?? '').trim().length > 0 && source().enrichModelMeta !== false) {
+    void refreshModelIndex().catch(() => undefined)
+  }
 
   // The first login leg's typed password, held across the 2FA leg. The panel
   // only proves it correct once the FULL login completes, so persistence is
@@ -266,8 +307,8 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
         claudeCodeOnly: group.claudeCodeOnly,
       }))
     },
-    sync: async (keyIds?: number[]) => {
-      const report = await engine.sync(source(), keyIds)
+    sync: async (keyIds?: number[], scope?: 'selection' | 'registered') => {
+      const report = await engine.sync(source(), keyIds, scope ?? 'selection')
       reports.record(report)
       return report
     },
@@ -314,6 +355,7 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
       }
     },
     isSyncRunning: () => engine.isRunning(),
+    syncProgress: () => engine.progress(),
     icon: () => instanceProbe.icon(instance()),
     siteName: () => instanceProbe.siteName(instance()),
     // The header account is cosmetic, but failures propagate: the route layer
@@ -395,7 +437,13 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
       })
       const endpoints = await discoverOAuthEndpoints(instanceValue)
       const { verifier, challenge } = await createPkcePair()
-      const attempt = oauthAttempts.create({ verifier, redirectUri, scope: oauthScopesFor(source().deleteOrphanKeys), pullApp: pullApp === true })
+      const scope = oauthScopesFor(source().deleteOrphanKeys)
+      // The provider refuses an unregistered callback *before* its consent
+      // page; catch that here so the dialog shows why instead of polling a
+      // grant that can never arrive (the refusal itself has nowhere to land —
+      // RFC 6749 §4.1.2.1 forbids redirecting to an untrusted redirect_uri).
+      await ensureAuthorizeAccepted({ instance: instanceValue, endpoints, redirectUri, scope, challenge })
+      const attempt = oauthAttempts.create({ verifier, redirectUri, scope, pullApp: pullApp === true })
       const authorizeUrl = buildAuthorizeUrl(endpoints, {
         redirectUri,
         scope: attempt.scope,
@@ -502,6 +550,37 @@ export function apply(ctx: Context, config: ResolvedSub2apiSyncConfig): void {
   ctx.on('loader/volatile-update', () => {
     judge()
     arm()
+    // Turning enrichment on (or configuring the instance) late still warms the
+    // catalog; the call is cache-aware and single-flight, so the common case —
+    // a settings write while the cache is hot — is a resolved promise.
+    if ((source().baseURL ?? '').trim().length > 0 && source().enrichModelMeta !== false) {
+      void refreshModelIndex().catch(() => undefined)
+    }
   })
   ctx.effect(() => () => disarm())
+
+  /**
+   * Self-heal: a host-side reload can land between a sync's commit and its
+   * read-back, leaving "keys are selected but no routes exist" — the exact
+   * state that used to require the user to notice and re-sync. One bounded
+   * pass per activation repairs it. Only when SIGNED IN with a non-empty
+   * selection: a deliberate logout or a cleared selection must never be
+   * resurrected by a background write.
+   */
+  let healTimer: ReturnType<typeof setTimeout> | undefined
+  const heal = (): void => {
+    const selected = source().selectedKeys ?? []
+    if (selected.length === 0 || engine.isRunning()) return
+    const section = ctx.settings.describe().find((descriptor) => descriptor.ns === PI_AI_NS)?.value
+    if (describeOwnedRoutes(section).length > 0) return
+    void (async () => {
+      const auth = await gateway.authState().catch(() => undefined)
+      if (auth?.signedIn !== true) return
+      ctx.logger.warn('sub2api-sync: 已勾选 key 但没有任何已同步路由——自动重新同步一次（修复宿主重载造成的丢失）')
+      const report = await engine.sync(source())
+      reports.record(report)
+    })().catch((error: unknown) => { ctx.logger.error(error) })
+  }
+  healTimer = setTimeout(heal, 3_000)
+  ctx.effect(() => () => { if (healTimer !== undefined) clearTimeout(healTimer) })
 }
