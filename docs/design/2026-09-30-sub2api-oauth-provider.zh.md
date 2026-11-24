@@ -394,9 +394,12 @@ client_secret=…        (confidential)
 ```
 matchRedirectURI(registered: string[], presented: string): boolean
   1. 解析两者；scheme、host 必须完全一致（大小写规范化 host）
-  2. host ∈ {127.0.0.1, ::1, localhost} 且 scheme === 'http'
+  2. host ∈ {127.0.0.1, ::1} 且 scheme === 'http'
        → 端口不参与比较（RFC 8252 §7.3）；否则端口必须相等
-  3. path + query 必须逐字符相等（本场景 path 恒 /plugins/dsh-sub2api-sync/oauth/callback，无 query）
+       （2026-11-24 部署实测：白名单只认 127.0.0.1 / ::1 字面量，localhost 被拒——见 §15.2；
+         若上游决定支持 localhost，需同时改实现与本条）
+  3. path 必须命中某个登记项；query 不参与比较（2026-11-24 实测：…/callback?foo=bar 放行，
+     未登记 path 一律 400，故 path 校验强度高于本条原设计的「逐字符相等」范围之外的部分仍按登记表执行）
   4. 拒绝一切通配/前缀/包含匹配
 ```
 
@@ -765,4 +768,45 @@ frontend/src/router/index.ts                              # +2 路由（requires
 ### 14.5 MVP 验收
 
 全量 §8.1 安全规则 11 条全部维持（含 reveal 纪律与 TokenVersion 联动）；测试取 §8.2 全表并剔除暂缓项相关行：T1–T19、T23–T32 照跑，`/me` 与 `keys:revoke` 相关行顺延到全量 Phase 3。插件侧联调用例 T25–T28、T32 为 MVP 的最终出口判据。
+
+---
+
+## 15. 部署实测校准（2026-11-24）：redirect_uri 白名单
+
+采集方式：对线上实例 `https://api.nexarelay.com` 的 `/api/v1/oauth/authorize` 逐条 GET 探测——同一 client（`dsh-sub2api-sync`）、同一 scope 与 PKCE 参数，**只换 `redirect_uri`**，记录状态码与是否落到同意页。
+
+### 15.1 现象
+
+DSH 宿主跑在 `10.10.10.20`，浏览器以 `http://10.10.10.20:3079` 打开 Web GUI 后发起网页授权：新标签页直接显示
+`{"error":"invalid_request","error_description":"Invalid OAuth authorization request"}`，**未到同意页**；设置卡停在「等待浏览器授权…」直到 attempt TTL（10min）过期。同一账号走本机 `http://127.0.0.1:<端口>` 入口可正常授权。
+
+### 15.2 探针矩阵
+
+| `redirect_uri` | 结果 |
+|---|---|
+| `http://127.0.0.1:3079/plugins/dsh-sub2api-sync/oauth/callback` | 302 → `/oauth/authorize?transaction_id=…` |
+| `http://127.0.0.1:59999/…`（任意端口） | 302 |
+| `http://[::1]:3079/…` | 302 |
+| `http://localhost:3079/…` | **400 invalid_request** |
+| `https://127.0.0.1:3079/…` | **400**（回环只收 http） |
+| `http://127.0.0.2:3079/…` | **400** |
+| `http://10.10.10.20:3079/…`、`http://192.168.1.10:3079/…`、`http://dsh.lan:3079/…` | **400** |
+| `http://127.0.0.1:3079/plugins/dsh-sub2api-sync/oauth/callback?foo=bar` | 302（query 不参与匹配） |
+| `http://127.0.0.1:3079/zzz/nope`、`…/oauth/callback/x` | **400**（未登记 path 一律拒） |
+
+结论：
+
+1. 回环白名单**只认 `127.0.0.1` / `::1` 字面量**（§1-D8 写的 `localhost` 本环境不认），端口不参与比较；
+2. **一切非回环 origin 被拒**——私网 IP、hostname、HTTPS 回环都不行；本环境**未验证**「登记后放行」（管理端 `/api/v1/admin/oauth-clients` 端点存在但需管理员凭据，未实测）；
+3. 拒绝时**不重定向**（符合 §3.1 第 3 步的安全要求），但响应是 JSON 400 而非 §3.1 设计的同源 SPA `/oauth/error` 页——浏览器侧因此只看到裸 JSON。
+
+### 15.3 处置
+
+| # | 侧 | 动作 | 状态 |
+|---|---|---|---|
+| 1 | 插件 | 非回环 origin 在 `POST /oauth/start` 内先做一次 no-follow authorize 预检（`probeAuthorize`）；被拒则用「同 path 的回环形态」再探一次，把「该 origin 未登记」与「请求本身有问题（client/scope/PKCE）」区分开，并把实例错误码与两条出路上抛到设置卡对话框；结论按 origin 缓存（拒绝 60s / 通过 5min），传输错误与 5xx 一律放行（fail-open，避免误杀） | ✅ 已实现（本次改动） |
+| 2 | 插件 | `localhost` 入口在提交前规范化为 `127.0.0.1`（同一回环资源；回调不带 cookie，只带本进程持有的一次性 `state`） | ✅ 已实现（本次改动） |
+| 3 | 插件 | 非回环页面上在点击前给出提示；文案不再指引「用 NAS/局域网 IP 打开」 | ✅ 已实现（本次改动） |
+| 4 | Provider | 把 `localhost` 纳入回环白名单（与 §1-D8 一致），或反过来把 §1-D8/§3.7 明确成只支持 `127.0.0.1`/`::1`；建议顺带把 authorize 拒绝响应改成同源错误页 | ⏳ 待 provider 仓库处理（本仓库无其源码） |
+| 5 | 运维 | 跨设备长期使用：实例侧登记该 origin（含端口、全串精确）+ 固定 DSH web 端口；零配置路径仍是回环入口（本机 `127.0.0.1` 或 ssh 隧道） | 文档 |
 

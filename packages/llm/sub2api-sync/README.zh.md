@@ -85,6 +85,7 @@ dsh plugin --profile web add ./packages/llm/sub2api-sync
 - 一切秘密（面板 token、密码、各 relay key）只进 harness 凭据存储（确定性引用 `DSH_SUB2API_TOKEN_<实例哈希>`、`DSH_SUB2API_KEY_<key-id>`、`DSH_SUB2API_PASSWORD_<实例哈希>`、dsh-Go 原生设置槽 `DSH_SUB2API_PANEL_PASSWORD`），不进 settings、不进日志、不进会话；
 - `GET /keys` 只回 key 元数据（id/名称/分组/状态），**不回明文**；明文只用于引擎解析该 key 并即时写入凭据存储；
 - 宿主动作路由只接受回环同源请求；跨设备访问 web UI 时配置只读（平台 `memory` 模式），动作需在 `cordis.yml` 显式开启 `allowRemoteActions`（默认关闭）。
+- **网页授权的回调默认只认回环**：sub2api 实例的 dsh client 只登记本机回环回调（`http://127.0.0.1` / `[::1]`，端口不限）；用局域网 IP 打开本页时，实例会在同意页之前直接拒绝（RFC 6749 §4.1.2.1：不向未登记的 redirect_uri 跳转）。插件在发起前做一次预检，把实例的拒绝原因显示在对话框里，并在非回环页面上给出提示；跨设备请先用 `ssh -N -L <本地端口>:127.0.0.1:<端口>` 建隧道、以 `http://127.0.0.1:<本地端口>` 访问，或先在实例侧登记该回调地址（`oauthCallbackOrigin` 只改变插件提交的 origin，**登记仍在实例侧**）。授权是**一次性**动作——令牌落在宿主凭据库，成功一次后可继续用局域网 IP 操作；`localhost` 入口会自动规范化为 `127.0.0.1` 再提交。
 
 ## 同步做什么
 
@@ -95,12 +96,17 @@ dsh plugin --profile web add ./packages/llm/sub2api-sync
 3. 按**其所属分组**的 `platform` 映射 wire 协议并推导条目 `baseURL`（Anthropic SDK 给裸 host，OpenAI 系给 `/v1` 根）；
 4. 经携带 `expectedRevision` 的定点 `settings.mutate` 写入 `providers.sub2api-<10-hex>`，附宽松重试策略（5 次 / 120s 退避上限）。
 
-路由后缀是 **SHA-256(实例地址, key id) 的 10 位十六进制截断**——稳定、跨实例不碰撞，且**刻意不含面板的顺序 key id**：路由名不暴露站点发过多少 key，截图分享配置也不会泄露。条目只覆盖 `sub2api-<10-hex>`（现行）与 `sub2api-<纯数字>`（旧版遗留，下次同步自动迁移清理）两种形态（**一把 key 一个供应商**，显示名由 `providerNameTemplate` 渲染 key 名）。从勾选集消失的 key 会连带移除条目与凭据；远端 key 仅在 `deleteOrphanKeys` 开启时撤销（key id 由面板 key 列表反查，旧数字路由直接自带）。登出、授权失效与切换实例会**整站清除**本插件的同步状态——owned 路由、relay key 凭据与**上次同步的报告**一并清除（报告描述的状态已不存在，不得继续展示）。
+**耗时只花在一次往返上**：面板读取（分组 ∥ 首页 key 列表）、元数据目录、站点名探测三步并发；各 key 的 `/v1/models` 走有界并发（默认 4，遇 429 自动重试一次）；模型发现结果按「实例+分组+明文摘要」缓存 `discoveryCacheSeconds` 秒（默认 60，0=每次重查）。所有出站请求都有硬上限（面板 10s / 网关 20s / 目录 15s），卡住的连接会报「超时」而不是一直转圈。同步报告带 `timing`（面板/目录/发现/写入/总计），卡片同步中显示分步进度（读取面板 → 拉取模型 n/m → 写入路由）。
+
+**两个入口，两种范围**：Keys 卡的「同步所选」按勾选走，可创建、可更新、可移除（从勾选集消失的 key 会连带移除条目与凭据）；同步卡的「刷新同步」只作用于**已注册路由背后的 key**（由每条路由的 `routeKeyIds` 反查，旧式数字路由自带 key id），把它们的条目重新校验并重写一遍，**永不新建、永不删除**——一条路由都没注册时按钮置灰，接口直接报「当前没有已注册的路由可刷新」。定时同步沿用勾选范围。
+
+路由后缀是 **SHA-256(实例地址, key id) 的 10 位十六进制截断**——稳定、跨实例不碰撞，且**刻意不含面板的顺序 key id**：路由名不暴露站点发过多少 key，截图分享配置也不会泄露。条目只覆盖 `sub2api-<10-hex>`（现行）与 `sub2api-<纯数字>`（旧版遗留，下次同步自动迁移清理）两种形态（**一把 key 一个供应商**，显示名由 `providerNameTemplate` 渲染 key 名）。从勾选集消失的 key 会连带移除条目与凭据；远端 key 仅在 `deleteOrphanKeys` 开启时撤销（key id 由面板 key 列表反查，旧数字路由直接自带）。登出与切换实例会**整站清除**本插件的同步状态——owned 路由、relay key 凭据与**上次同步的报告**一并清除；**授权失效（刷新失败）只清报告、保留路由与凭据**（重新授权即恢复；单个 key 同步失败同样保留它上次的路由）（报告描述的状态已不存在，不得继续展示）。
 
 ## Model Experience
 
 - 每分组一个 provider、一把 relay key；模型目录来自实例发现；逐模型 `compat` 继承用户模板；推理档位 `reasoningEfforts` 模板显式设置优先，未设置时按模型自动填充（见下）；
-- **模型元数据补全（C4）**：同步时按模型 id 从 models.dev 目录补全**显示名称**（`name`，即模型目录编辑器「显示名称」列）/`contextWindow`/`maxTokens`/图片输入/推理档位——`enrichModelMeta` 开启（缺省）时联网拉取（24h 进程内缓存），失败自动降级到**随包内置快照**（`data/models-dev.snapshot.json`，`pnpm --filter @mangoc/dsh-sub2api-sync models:refresh` 重新生成）；关闭则只用内置快照（离线确定）；两者都未命中的模型保持路由级缺省 128000/8192/纯文本；
+- **模型元数据补全（C4）**：同步时按模型 id 从 models.dev 目录补全**显示名称**（`name`，即模型目录编辑器「显示名称」列）/`contextWindow`/`maxTokens`/图片输入/推理档位——`enrichModelMeta` 开启（缺省）时联网拉取（24h 进程内缓存；**目录刷新在后台进行、从不阻塞同步**——本次用缓存或内置快照，下一次即用新目录，抓取另有 15s 上限），失败自动降级到**随包内置快照**（`data/models-dev.snapshot.json`，`pnpm --filter @mangoc/dsh-sub2api-sync models:refresh` 重新生成）；关闭则只用内置快照（离线确定）；两者都未命中的模型保持路由级缺省 128000/8192/纯文本；
+- **容量合并取保守值**：同一模型 id 在 models.dev 里有多个来源时，`contextWindow`/`maxTokens` 取**官方厂商（first-party）报的值**，没有则取全部来源的**下中位数**，并把输出钳到不超过上下文窗口——**绝不取最大值**（单个乐观聚合商曾让同步出的路由写成 `max_output_tokens=1050000`，而该模型上游只允许 393216，请求直接被拒）；
 - **推理档位自动填充**：取 models.dev 条目的 `reasoning_options` 中 `effort` 枚举，映射为 pi-ai 的 `reasoningEfforts`（`none` → `off: null`，其余同名直传）。合并按 **first-party 优先**：官方厂商条目（openai/anthropic/google/zhipuai/zai/deepseek/moonshotai/xai/alibaba 等及官方云托管）存在即胜出——官方条目无 effort 数据（如旧版 Claude/Gemini 的 budget-only 条目）同样压制聚合商的虚报词表；无官方条目时聚合商来源取**交集**。优先级：**模板显式设置（含 `false`）> 每模型自动填充 > 不写字段**；显示名 = `providerNameTemplate` 渲染的 key 名。
 - **Claude 原生推理档位**：对已确认支持 adaptive thinking、且目录有 effort 元数据的 Claude 模型（如 Opus 4.6/4.7/4.8、Sonnet 4.6），仅在 `anthropic-messages` 协议下逐模型自动补齐 `compat.forceAdaptiveThinking: true`。该开关让 SDK 直接发送 Claude 原生的 `thinking: { type: "adaptive" }` 与 `output_config: { effort: "max" }`（以选择 Max 为例），不经过 OpenAI 协议转换，也不将 Max 降成 token budget。用户模板中同名 compat 字段（包括显式 `false`）优先；关闭 reasoning、旧模型、未知别名/新版本、缺少目录 effort 元数据或其他协议都不会自动开启。更新插件并重新同步即可修复已有受管路由，重复同步不重复写入；无需修改 sub2api 的记录值。注意：用量日志的 effort 是请求声明档位，不是实际思考量的测量值。
 - **显示名称富化**：取 models.dev 条目的 `name` 写入 pi-ai 模型条目的 `name` 字段（模型选择器与「已自定义模型目录」编辑器的显示名）；剥离 models.dev 的 " (latest)" 家族标记，名称与模型 id 相同（无信息量）时不写；合并同样 first-party 优先（官方名称覆盖，聚合商名称仅补缺），纯名称条目也参与富化。
