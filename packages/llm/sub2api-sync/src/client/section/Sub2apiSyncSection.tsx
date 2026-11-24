@@ -18,6 +18,7 @@ import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { type Sub2apiSyncConfig } from '../../config.ts'
 import { ROUTES, type GroupsView, type StatusResponse, type StatusRoute } from '../../routes.ts'
 import type { SyncAction, SyncReport } from '../../engine.ts'
+import { formatDuration, syncProgressText } from '../progress.ts'
 import type { NS } from '../locales.ts'
 import { refreshStatus, useStatusHealth } from '../status.ts'
 import { dropSelectedKey, pruneInvalidSelection, setField, useConfigForm } from '../useConfigForm.ts'
@@ -202,7 +203,6 @@ export function Sub2apiSyncSection({ t, api, config, useStatus }: Sub2apiSyncSec
         : t('signedInOAuth')
       : t('signedInAs', { email: auth?.email ?? '' })
   const routeCount = status?.routes.length ?? 0
-  const selectedCount = configValues?.selectedKeys?.length ?? 0
   const report = status?.lastReport
 
   // Account block ----------------------------------------------------------
@@ -248,12 +248,25 @@ export function Sub2apiSyncSection({ t, api, config, useStatus }: Sub2apiSyncSec
     void refreshStatus()
   }
 
+  /**
+   * The sync card's button REFRESHES what exists: it re-reads the routes this
+   * plugin registered and rewrites them. Creating routes for newly ticked keys
+   * (or dropping routes for unticked ones) stays on the Keys card's
+   * 「同步所选」 — one button, one meaning.
+   */
   const syncNow = (): void => {
     setSyncBusy(true)
     setSyncFeedback(undefined)
-    api.sync()
+    api.sync(undefined, 'registered')
       .then(async (response) => {
-        setSyncFeedback({ tone: 'ok', text: t('syncDone') })
+        const entries = response.report.entries
+        const failed = entries.filter((entry) => entry.action === 'failed')
+        setSyncFeedback(failed.length === 0
+          ? { tone: 'ok', text: t('syncDone') }
+          : { tone: 'error', text: t('syncPartial', { ok: entries.length - failed.length, total: entries.length, reason: failed[0]?.error ?? '' }) })
+        // Release the busy marker first: the run is over, and the prune +
+        // status round trip below only updates the summary (see KeysCard).
+        setSyncBusy(false)
         // Stale selections have no row to uncheck — drop them automatically.
         await pruneInvalidSelection(config, response.report)
         return refreshStatus()
@@ -266,20 +279,42 @@ export function Sub2apiSyncSection({ t, api, config, useStatus }: Sub2apiSyncSec
   // the host drops the provider route and credential without touching the
   // panel (which may refuse, e.g. an empty balance); the card drops the
   // selection entry so the next sync cannot resurrect the provider.
-  const [removingRoute, setRemovingRoute] = useState<string | undefined>(undefined)
+  //
+  // The click is OPTIMISTIC: the host path costs two settings commits (the
+  // provider unset plus the selection write) and a status round trip, which is
+  // exactly what made the button feel stuck. The row leaves the list at once;
+  // the bookkeeping runs behind it and only a REFUSED removal puts it back.
+  const [removing, setRemoving] = useState<string[]>([])
   const removeRoute = (route: StatusRoute): void => {
     const keyId = route.keyId
-    if (keyId === undefined || removingRoute !== undefined) return
-    setRemovingRoute(route.route)
-    api.removeKey(keyId)
-      .then(async () => {
+    if (keyId === undefined || removing.includes(route.route)) return
+    setRemoving((list) => [...list, route.route])
+    setSyncFeedback(undefined)
+    void api.removeKey(keyId)
+      .then(() => {
         setSyncFeedback({ tone: 'ok', text: t('entryRemoveDone', { name: route.displayName ?? route.route }) })
-        await dropSelectedKey(config, keyId).catch(() => undefined)
-        await refreshStatus()
+        // Background: drop the key from the selection (so the next sync cannot
+        // resurrect the provider), then republish the status.
+        void dropSelectedKey(config, keyId)
+          .catch(() => undefined)
+          .then(() => refreshStatus())
+          .catch(() => undefined)
       })
-      .catch((cause) => { setSyncFeedback({ tone: 'error', text: t('actionFailedLabel', { message: messageOf(cause) }) }) })
-      .finally(() => { setRemovingRoute(undefined) })
+      .catch((cause: unknown) => {
+        // The route is still there — put the row back where it was.
+        setRemoving((list) => list.filter((candidate) => candidate !== route.route))
+        setSyncFeedback({ tone: 'error', text: t('actionFailedLabel', { message: messageOf(cause) }) })
+      })
   }
+
+  // Drop the optimistic markers once the status stops listing those routes
+  // (and never grow the set across removals).
+  useEffect(() => {
+    if (removing.length === 0 || status === undefined) return
+    const existing = new Set((status.routes ?? []).map((route) => route.route))
+    const next = removing.filter((route) => existing.has(route))
+    if (next.length !== removing.length) setRemoving(next)
+  }, [status, removing])
 
   return (
     <div className="s2s-section">
@@ -342,44 +377,35 @@ export function Sub2apiSyncSection({ t, api, config, useStatus }: Sub2apiSyncSec
         <div className="s2s-row">
           <span className="s2s-name">{t('syncTitle')}</span>
           <div className="s2s-actions">
-            {(syncRunning || syncBusy) && <TextShimmer active>{t('syncing')}</TextShimmer>}
-            <Button variant="primary" disabled={!signedIn || !writable || syncBusy || syncRunning || selectedCount === 0} onClick={syncNow}>
+            {(syncRunning || syncBusy) && <TextShimmer active>{syncProgressText(t, status?.syncProgress) ?? t('syncing')}</TextShimmer>}
+            <Button
+              variant="primary"
+              title={t('syncNowHint')}
+              disabled={!signedIn || !writable || syncBusy || syncRunning || routeCount === 0}
+              onClick={syncNow}
+            >
               {t('syncNow')}
             </Button>
           </div>
         </div>
-        {routeCount > 0 && <p className="s2s-feedback s2s-hint">{t('routesSummary', { count: routeCount })}</p>}
-        {/* The registered routes themselves — name, model count, and the wire
-            protocol each one speaks — with the per-route remove button: this
-            is the live state, so removal belongs here, not on the report. */}
-        {status?.routes.map((route) => (
-          <div className="s2s-reportLine" key={route.route}>
-            <span className="s2s-reportMark" data-mark="ok" aria-hidden="true" />
-            <span className="s2s-reportText">
-              {t('entryModels', { name: route.displayName ?? route.route, count: route.models })}
-              {' '}
-              {route.api !== undefined ? <Tag tone="info">{route.api}</Tag> : null}
-            </span>
-            {route.keyId !== undefined && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="s2s-reportRemove"
-                disabled={removingRoute !== undefined}
-                onClick={() => { removeRoute(route) }}
-              >
-                {t('entryRemove')}
-              </Button>
-            )}
-          </div>
-        ))}
         {syncFeedback !== undefined && (
           <p className={`s2s-feedback ${syncFeedback.tone === 'ok' ? 's2s-feedbackOk' : 's2s-feedbackError'}`}>{syncFeedback.text}</p>
         )}
-        {/* The report is a hint about the last sync run only — no actions.
-            Never paint it (or the empty placeholder) once the session is
-            gone, even if a stale status snapshot is still in flight. */}
-        {signedIn && <SyncReportView t={t} report={report} />}
+        {/* ONE list: the live routes, each carrying what the last run did to it.
+            The old layout printed the routes and then the same rows again as a
+            report below — two blocks describing a single state. */}
+        {signedIn && (
+          <SyncRoutesView
+            t={t}
+            // A route being removed leaves the list immediately: the host path
+            // is two settings commits + a status round trip long, and waiting
+            // for it is what felt like the click not landing.
+            routes={(status?.routes ?? []).filter((route) => !removing.includes(route.route))}
+            report={report}
+            removing={removing}
+            onRemove={removeRoute}
+          />
+        )}
       </section>
 
       <SignInDialog open={signInOpen} onClose={() => { setSignInOpen(false) }} api={api} config={config} baseURL={configuredBaseURL} writable={writable} routesReachable={routesReachable} onSignedIn={onSignedIn} t={t} />
@@ -388,31 +414,81 @@ export function Sub2apiSyncSection({ t, api, config, useStatus }: Sub2apiSyncSec
 }
 
 /**
- * The last sync report — a hint about the previous run (meta line, per-entry
- * outcomes, removals, warnings). No actions live here: removal belongs on
- * the registered-routes list above, which reflects the live state.
+ * The sync card's ONE list: the live registered routes, each annotated with
+ * what the last run did to it (新建/更新/无变化/失败) plus its failure reason.
+ * The old layout printed the routes and then repeated every row in a separate
+ * report block — two lists describing a single state. The report's per-entry
+ * rows now merge INTO the route rows; only entries without a live route (a key
+ * that failed before writing one, or a stale selection) get their own line.
  */
-function SyncReportView({ t, report }: PropsLocale<typeof NS> & { report: SyncReport | undefined }) {
-  if (report === undefined) return <p className="s2s-feedback s2s-hint">{t('reportEmpty')}</p>
+function SyncRoutesView({ t, routes, report, removing, onRemove }: PropsLocale<typeof NS> & {
+  routes: StatusRoute[]
+  report: SyncReport | undefined
+  /** Routes whose removal is in flight (their rows are already gone). */
+  removing: string[]
+  onRemove: (route: StatusRoute) => void
+}) {
+  const byRoute = new Map((report?.entries ?? []).map((entry) => [entry.route, entry]))
+  const live = new Set(routes.map((route) => route.route))
+  // Only FAILURES get a row without a route. A successful entry whose route is
+  // gone was removed on purpose — re-printing it as an "orphan" would resurrect
+  // the row the user just deleted.
+  const orphans = (report?.entries ?? []).filter((entry) => !live.has(entry.route) && entry.action === 'failed')
+  const meta = report === undefined || routes.length === 0
+    ? t('routesSummary', { count: routes.length })
+    : report.timing !== undefined
+      ? t('routesMeta', { count: routes.length, writes: report.writes, attempts: report.attempts, duration: formatDuration(report.timing.totalMs) })
+      : t('routesMetaNoTiming', { count: routes.length, writes: report.writes, attempts: report.attempts })
+
   return (
     <div className="s2s-column">
-      <span className="s2s-hint">{t('reportMeta', { writes: report.writes, attempts: report.attempts })}</span>
-      {report.entries.map((entry, index) => (
-        <div className="s2s-reportLine" key={`${entry.groupId}-${index}`}>
+      {/* One meta line: how many routes exist AND what the last run cost —
+          the answer to "the sync feels slow" without a second block. */}
+      <span className="s2s-hint">{meta}</span>
+      {routes.map((route) => {
+        const entry = byRoute.get(route.route)
+        const failed = entry?.action === 'failed'
+        return (
+          <div className="s2s-reportLine" key={route.route}>
+            <span className="s2s-reportMark" data-mark={failed ? 'fail' : 'ok'} aria-hidden="true" />
+            <span className={`s2s-reportText${failed ? ' s2s-reportError' : ''}`}>
+              {t('entryModels', { name: route.displayName ?? route.route, count: route.models })}
+              {' '}
+              {route.api !== undefined ? <Tag tone="info">{route.api}</Tag> : null}
+              {entry !== undefined ? <Tag tone={actionToneOf(entry.action)}>{t(actionKeyOf(entry.action))}</Tag> : null}
+              {failed && entry?.error !== undefined ? <span className="s2s-inlineError">{entry.error}</span> : null}
+            </span>
+            {route.keyId !== undefined && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="s2s-reportRemove"
+                disabled={removing.includes(route.route)}
+                onClick={() => { onRemove(route) }}
+              >
+                {t('entryRemove')}
+              </Button>
+            )}
+          </div>
+        )
+      })}
+      {/* Entries the routes list cannot show: a key that failed before writing
+          its route, or an id the panel no longer serves. */}
+      {orphans.map((entry) => (
+        <div className="s2s-reportLine" key={`entry-${entry.route}-${entry.keyId ?? 'x'}`}>
           <span className="s2s-reportMark" data-mark={entry.action === 'failed' ? 'fail' : 'ok'} aria-hidden="true" />
           <span className={`s2s-reportText${entry.action === 'failed' ? ' s2s-reportError' : ''}`}>
-            {entry.action === 'failed'
-              ? t('entryError', { name: entry.displayName ?? entry.route, error: entry.error ?? '' })
-              : t('entryModels', { name: entry.displayName ?? entry.route, count: entry.models ?? 0 })}
+            {t('entryModels', { name: entry.displayName ?? entry.route, count: entry.models ?? 0 })}
             {' '}
             <Tag tone={actionToneOf(entry.action)}>{t(actionKeyOf(entry.action))}</Tag>
+            {entry.action === 'failed' && entry.error !== undefined ? <span className="s2s-inlineError">{entry.error}</span> : null}
           </span>
         </div>
       ))}
-      {report.removed.length > 0 && (
+      {report !== undefined && report.removed.length > 0 && (
         <span className="s2s-reportText">{t('reportRemoved', { routes: report.removed.join(', ') })}</span>
       )}
-      {report.warnings.map((warning, index) => (
+      {report?.warnings.map((warning, index) => (
         <span className="s2s-reportText s2s-reportError" key={index}>{t('reportWarningLine', { message: warning })}</span>
       ))}
     </div>

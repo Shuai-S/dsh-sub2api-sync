@@ -80,7 +80,8 @@ export interface PluginApi {
   account(): Promise<AccountResponse>
   resetSyncState(previousBaseURL?: string): Promise<{ ok: true }>
   removeKey(keyId: number): Promise<{ ok: true }>
-  sync(keyIds?: number[]): Promise<SyncResponse>
+  /** `scope: 'registered'` refreshes existing routes only (the sync card's button). */
+  sync(keyIds?: number[], scope?: 'registered'): Promise<SyncResponse>
   oauthStart(): Promise<OAuthStartResponse>
   oauthProbe(address: string): Promise<OAuthProbeResponse>
   oauthStatus(attemptId: string | undefined): Promise<OAuthAttemptStatusResponse>
@@ -108,7 +109,13 @@ export function createPluginApi(): PluginApi {
       previousBaseURL !== undefined ? { previousBaseURL } : undefined,
     )),
     removeKey: (keyId) => callJson<{ ok: true }>(ROUTES.removeKey, post({ keyId })),
-    sync: (keyIds) => callJson<SyncResponse>(ROUTES.sync, post(keyIds !== undefined ? { keyIds } : undefined)),
+    sync: (keyIds, scope) => callJson<SyncResponse>(
+      ROUTES.sync,
+      post({
+        ...(keyIds !== undefined ? { keyIds } : {}),
+        ...(scope !== undefined ? { scope } : {}),
+      }),
+    ),
     oauthStart: () => {
       // The browser declares where the GUI actually loads from: the OAuth
       // callback must come back to THIS origin, which the Host header cannot

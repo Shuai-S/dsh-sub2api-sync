@@ -98,3 +98,24 @@ describe('Sub2apiClient.listModels', () => {
     expect(() => new Sub2apiClient({ baseURL: '' })).toThrowError(/http\(s\)/)
   })
 })
+describe('request timeout', () => {
+  it('reports a capped call as a timeout, not a generic network error', async () => {
+    const fetchImpl = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+      })
+    })) as typeof fetch
+    const client = new Sub2apiClient({ baseURL: 'http://gw:8080', fetchImpl, timeoutMs: 5 })
+    await expect(client.listModels('sk-x')).rejects.toThrow(/超时/)
+  })
+
+  it('leaves a responsive call untouched', async () => {
+    const fetchImpl = (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ id: 'm-1' }] }),
+    }) as unknown as Response) as typeof fetch
+    const client = new Sub2apiClient({ baseURL: 'http://gw:8080', fetchImpl, timeoutMs: 5 })
+    await expect(client.listModels('sk-x')).resolves.toEqual([{ id: 'm-1' }])
+  })
+})

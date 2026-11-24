@@ -92,6 +92,24 @@ const CSS = `
   white-space: nowrap;
 }
 
+/* The keys card has no title row: its search field carries the header role
+   (the placeholder states the live key count). Four controls in one title row
+   used to overflow a settings dialog (~470px of usable width) and wrap the
+   last button onto a second right-aligned line — the toolbar below keeps the
+   one-row shape at every width. */
+.s2s-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+}
+
+/* Buttons keep their intrinsic width; only the search field stretches. */
+.s2s-toolbar > button {
+  flex: none;
+}
+
 .s2s-divider {
   border-top: 0.5px solid var(--dsw-alias-border-l2);
 }
@@ -171,8 +189,10 @@ const CSS = `
 
 .s2s-keyRow {
   display: grid;
-  /* Columns align across rows: name+checkbox / group / status / type. */
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr);
+  /* Columns align across rows: name+checkbox / group / status / type. The
+     last two tracks are fixed-width so the name column absorbs the slack and a
+     long group tag cannot push the status/platform columns around. */
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) 5.5em 6.5em;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -205,6 +225,27 @@ const CSS = `
 
 .s2s-keyRow[aria-pressed='true'] {
   border-color: var(--dsw-alias-state-business-primary);
+}
+
+/* The group tag keeps to its own track: a long group name clips with an
+   ellipsis (the full name rides the wrapper's title) instead of running into
+   the status column. */
+.s2s-tagCell {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.s2s-tagCell > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.s2s-tagText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .s2s-reportLine {
@@ -242,6 +283,13 @@ const CSS = `
 }
 
 .s2s-reportError {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* Failure reason riding after a route's tags — the merged list keeps the
+   explanation on the row it belongs to instead of in a second block. */
+.s2s-inlineError {
+  margin-left: 8px;
   color: var(--dsw-alias-state-error-primary);
 }
 
@@ -331,6 +379,11 @@ const CSS = `
   box-sizing: border-box;
   z-index: 10;
   overflow: hidden;
+  /* Elevation separates the panel from the dialog it floats over: without it
+     the flat white surface reads as the card being stretched (the "overflows
+     the dialog" report). */
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  box-shadow: 0 16px 40px color-mix(in srgb, #000 18%, transparent), 0 2px 8px color-mix(in srgb, #000 8%, transparent);
 }
 
 .s2s-groupSearch {
@@ -340,6 +393,11 @@ const CSS = `
 
 .s2s-groupSearch > * {
   width: 100%;
+  /* The Input primitive's wrapper is content-box: width:100% alone adds its
+     16px padding and 1px border on top of the row and pokes 17px past the
+     panel's right edge (clipped by the panel, so it reads as "the field is
+     wider than the popup"). */
+  box-sizing: border-box;
 }
 
 .s2s-groupList {
@@ -391,21 +449,34 @@ const CSS = `
   color: var(--dsw-alias-state-business-primary);
 }
 
-/* The keys-card search input: fixed-width slot between the title and the
-   action buttons (see the s2s-actions flex layout). */
+
+/* The keys-card search input: the elastic item of .s2s-toolbar. It takes the
+   leftover width and shrinks first, so the row keeps one line as long as the
+   buttons alone fit (the fixed 220px slot this replaces guaranteed a wrap). */
 .s2s-searchInput {
-  flex: none;
-  width: 220px;
+  flex: 1 1 160px;
+  min-width: 120px;
+  width: auto;
 }
 
-/* The keys-card pager: centered prev / status / next strip. */
+/* The keys-card footer: the create action anchors the left edge and the pager
+   rail stays right, so the card keeps one stable bottom line whether or not
+   the pager is rendered (the create entry must survive an empty list). */
 .s2s-pager {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
   min-height: 32px;
+  padding-top: 2px;
+}
+
+.s2s-pagerActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .s2s-pageStatus {
@@ -506,12 +577,21 @@ const CSS = `
     flex-basis: 100%;
   }
 
-  .s2s-searchInput {
-    width: 100%;
-    flex: 1 1 auto;
+  .s2s-toolbar {
+    flex-direction: column;
+    align-items: stretch;
   }
 
-  .s2s-pager {
+  .s2s-toolbar > button {
+    width: 100%;
+  }
+
+  .s2s-searchInput {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+
+  .s2s-pagerActions {
     justify-content: center;
   }
 
@@ -544,9 +624,22 @@ const CSS = `
 }
 `
 
-/** Inject the stylesheet once per document (idempotent across reloads). */
+/**
+ * Ensure this build's stylesheet is the one the document carries.
+ *
+ * Content-addressed rather than presence-checked: a plugin reload re-runs the
+ * client module while the injected <style> element survives, so a mere
+ * existence check kept serving the previous build's rules against the new DOM
+ * — new class names arrive unstyled and old widths stick until a full page
+ * reload. Replacing the text when it differs is idempotent for an unchanged
+ * build and self-healing across a rebuild.
+ */
 export function ensureCss(): void {
-  if (document.querySelector('style[data-plugin="dsh-sub2api-sync"]') !== null) return
+  const existing = document.querySelector('style[data-plugin="dsh-sub2api-sync"]')
+  if (existing !== null) {
+    if (existing.textContent !== CSS) existing.textContent = CSS
+    return
+  }
   const style = document.createElement('style')
   style.dataset.plugin = 'dsh-sub2api-sync'
   style.textContent = CSS

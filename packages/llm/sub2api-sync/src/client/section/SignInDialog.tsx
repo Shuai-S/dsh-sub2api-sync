@@ -24,6 +24,25 @@ type SignInPhase = SignInChannel | '2fa' | 'oauth-pending'
 
 const OAUTH_POLL_MS = 2000
 
+/** Where this GUI is actually served from. Read via `globalThis` so the file
+ * also type-checks in the server program (no DOM lib there). */
+function pageOrigin(): string | undefined {
+  return (globalThis as unknown as { location?: { origin?: string } }).location?.origin
+}
+
+/** Whether the page is served from a loopback origin — the only callback form
+ * instances register by default. An unparsable/absent origin is treated as
+ * loopback: the hint must never fire on a guess. */
+function isLoopbackPageOrigin(origin: string | undefined): boolean {
+  if (origin === undefined) return true
+  try {
+    const host = new URL(origin).hostname.replace(/^[|]$/g, '').toLowerCase()
+    return host === '127.0.0.1' || host === '::1' || host === 'localhost'
+  } catch {
+    return true
+  }
+}
+
 /** Dialog props: locale seat plus the plugin API face and close/success callbacks. */
 export interface SignInDialogProps extends PropsLocale<typeof NS> {
   open: boolean
@@ -53,6 +72,9 @@ export interface SignInDialogProps extends PropsLocale<typeof NS> {
  */
 export function SignInDialog({ open, onClose, api, config, baseURL, writable, routesReachable = true, onSignedIn, t }: SignInDialogProps) {
   const [phase, setPhase] = useState<SignInPhase>('password')
+  // The page's own origin decides whether the provider will accept the
+  // callback at all (see the loopback hint below).
+  const origin = pageOrigin()
   const [channel, setChannel] = useState<SignInChannel>('password')
   const [address, setAddress] = useState('')
   const [email, setEmail] = useState('')
@@ -290,7 +312,12 @@ export function SignInDialog({ open, onClose, api, config, baseURL, writable, ro
           </>
         )}
         {phase === 'oauth' && (
-          <span className="s2s-hint">{routesReachable ? t('oauthReadyHint') : t('oauthUnreachableHint')}</span>
+          <>
+            <span className="s2s-hint">{routesReachable ? t('oauthReadyHint') : t('oauthUnreachableHint')}</span>
+            {!isLoopbackPageOrigin(origin) && (
+              <span className="s2s-hint">{t('oauthNonLoopbackHint', { origin: origin ?? '' })}</span>
+            )}
+          </>
         )}
         {phase === 'oauth-pending' && (
           <div className="s2s-column">

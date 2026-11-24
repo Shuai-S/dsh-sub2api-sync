@@ -17,12 +17,20 @@ import type { StatusResponse } from '../routes.ts'
 import { callJson } from './usePluginApi.ts'
 
 const POLL_MS = 5000
+/**
+ * Tighter cadence while a sync runs: the host reports a phase + a per-key
+ * counter, and a 5s poll would show one frame of it at most. The route is a
+ * local in-process read, so 1s costs nothing measurable.
+ */
+const POLL_ACTIVE_MS = 1000
 
 /** Consecutive failed rounds before the card shows the unreachable banner. */
 const DEGRADED_AFTER = 2
 
 let snapshot: StatusResponse | undefined
 let timer: ReturnType<typeof setInterval> | undefined
+/** When the last poll round STARTED — the cadence gate (see {@link tick}). */
+let lastPollAt = 0
 const listeners = new Set<() => void>()
 
 /** Reachability of the plugin's action routes, as observed by the poller. */
@@ -60,11 +68,24 @@ async function poll(): Promise<void> {
   }
 }
 
+/**
+ * One tick of the cadence timer. The interval is fixed at the ACTIVE rate and
+ * each tick decides whether it is due: 1s while a sync is running, 5s
+ * otherwise, so the fine-grained polling never outlives the run it exists for.
+ */
+function tick(): void {
+  const now = Date.now()
+  if (now - lastPollAt < (snapshot?.syncRunning === true ? POLL_ACTIVE_MS : POLL_MS)) return
+  lastPollAt = now
+  void poll()
+}
+
 function subscribe(listener: () => void): () => void {
   listeners.add(listener)
   if (listeners.size === 1) {
+    lastPollAt = Date.now()
     void poll()
-    timer = setInterval(() => { void poll() }, POLL_MS)
+    timer = setInterval(tick, POLL_ACTIVE_MS)
   }
   return () => {
     listeners.delete(listener)
@@ -116,6 +137,7 @@ function getSnapshot(): StatusResponse | undefined {
  * into the store and returns; the interval only drives further rounds.
  */
 export async function refreshStatus(): Promise<StatusResponse | undefined> {
+  lastPollAt = Date.now()
   await poll()
   return snapshot
 }
