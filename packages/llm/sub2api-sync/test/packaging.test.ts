@@ -5,16 +5,37 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
   dependencies?: Record<string, string>
   peerDependencies?: Record<string, string>
   peerDependenciesMeta?: Record<string, { optional?: boolean }>
+  engines?: { node?: string; dsh?: string }
   files?: string[]
   icon?: string
 }
 const credentialsPackage = '@deepseek-ai/dsh-credentials'
 
 describe('runtime package metadata', () => {
-  it('ships the statically imported credential helper as a production dependency', () => {
-    expect(manifest.dependencies?.[credentialsPackage]).toBe('0.2.0-rc.2')
-    expect(manifest.peerDependencies?.[credentialsPackage]).toBeUndefined()
-    expect(manifest.peerDependenciesMeta?.[credentialsPackage]).toBeUndefined()
+  /**
+   * The host resolves a plugin's bare @deepseek-ai/dsh-* imports through the
+   * names that plugin lists as peers: dsh-app-boot's profile-resolution
+   * bootstrap reads the importing package's peerDependencies and redirects
+   * those names to its own installation. A dependency would instead install a
+   * second, stale copy beside the host's (0.4.0 shipped 0.2.0-rc.2 that way
+   * while hosts had moved on), so the helper is taken from the host as an
+   * optional peer — the same shape dsh-config-manager uses.
+   */
+  it('takes the credential helper from the host as an optional peer', () => {
+    expect(manifest.peerDependencies?.[credentialsPackage]).toBe('>=0.2.0-rc.2 <0.3.0-0')
+    expect(manifest.peerDependenciesMeta?.[credentialsPackage]?.optional).toBe(true)
+    expect(manifest.dependencies?.[credentialsPackage]).toBeUndefined()
+  })
+
+  /**
+   * `engines.dsh` decides compatibility alone: when it is present DSH ignores
+   * the peer ranges for admission (dsh-app-boot: "an own `engines.dsh` range
+   * decides alone and peerDependencies are ignored"). The `-0` ceiling is what
+   * blocks a 0.3 host, including its prereleases, instead of letting one load
+   * this plugin half-way.
+   */
+  it('declares the host range it is built against, with a 0.3 prerelease ceiling', () => {
+    expect(manifest.engines?.dsh).toBe('>=0.2.0-rc.2 <0.3.0-0')
   })
 })
 

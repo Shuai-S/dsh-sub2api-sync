@@ -18,7 +18,16 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plug
 - **Bilingual UI** — full zh/en settings card and plugin config card.
 - **Coexists cleanly** — the community plugin `GodD6366/dsh-sub2api` can stay installed; route names and credential references do not collide.
 
-**Requirements**: DSH ≥ 0.2.0-rc.2 · Node ≥ 22.19 · a sub2api panel account that can read relay key plaintext (admin).
+**Requirements**: DSH 0.2.x (declared as `engines.dsh: >=0.2.0-rc.2 <0.3.0-0`; the 0.3 line is refused rather than loaded half-way) · Node ≥ 22.19 · a sub2api panel account that can read relay key plaintext (admin).
+
+**Host compatibility** — built and typechecked against DSH **0.2.2-rc.5**; the same build runs on **0.2.1-rc.4**:
+
+| DSH host | evidence |
+|---|---|
+| 0.2.0-rc.2 – 0.2.1-rc.5 | build + typecheck + 356 tests green (0.2.1-rc.4 verified byte-identical `lib/` output) |
+| 0.2.2-rc.1 | green apart from host removals this release no longer relies on |
+| 0.2.2-rc.2 – 0.2.2-rc.5 | ✅ since 0.4.1: the host dropped `useAnchoredPosition`, so panel placement is now plugin-owned |
+| 0.3.x | ⛔ refused by `engines.dsh` instead of loading half-way |
 
 ## Install
 

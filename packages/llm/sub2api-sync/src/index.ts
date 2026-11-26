@@ -63,6 +63,10 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export { Config, validateConfig, DEFAULT_PROVIDER_NAME_TEMPLATE } from './config.ts'
+// The config types ride the root export because a consumer that reads this
+// plugin's resolved config needs to name it: exporting only `Config` leaves
+// Parameters<typeof apply>[1] as the only handle on the resolved shape.
+export type { ResolvedSub2apiSyncConfig, Sub2apiSyncConfig, LiveField, RetryPolicyOverride } from './config.ts'
 export { Sub2apiSyncEngine, Sub2apiSyncError, OWN_NS, PI_AI_NS } from './engine.ts'
 export { PanelClient, PanelGateway, PanelError } from './panel.ts'
 export { buildProviderProfile, baseURLForProtocol, protocolForPlatform, guessPlatformFromModels, renderProviderName, SUB2API_RETRY_POLICY } from './protocols.ts'

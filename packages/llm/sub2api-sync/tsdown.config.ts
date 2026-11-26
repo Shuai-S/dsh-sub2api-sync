@@ -12,6 +12,13 @@ const nodeExternal = [
 // ModuleLoader id) happens in scripts/wrap-client.mjs, which already owns the
 // wrapper and reads the (possibly variant-rewritten) package.json name.
 
+// Declarations are NOT emitted here any more: tsdown 0.4.4's dts step fused
+// neighbouring statements in 7 of the 12 files it produced ('./co./config.jseclare
+// module …') while keeping each file's byte count, so 0.4.0 shipped
+// declarations no TypeScript consumer could parse. `tsc -p tsconfig.dts.json
+// --emitDeclarationOnly` now owns that step, and scripts/check-dts.mjs proves
+// the result.
+
 export default defineConfig([
   {
     entry: {
@@ -19,7 +26,7 @@ export default defineConfig([
     },
     platform: 'node',
     format: 'esm',
-    dts: true,
+    dts: false,
     outDir: 'lib',
     fixedExtension: false,
     deps: { neverBundle: nodeExternal },

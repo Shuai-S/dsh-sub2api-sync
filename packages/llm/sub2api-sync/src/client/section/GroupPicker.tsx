@@ -9,7 +9,9 @@
  * `position: fixed` (fixed elements escape the card's clip), sizes it to the
  * trigger's exact width, clamps its height to the viewport
  * (`useAnchoredMaxHeight`), and filters as you type — the search field keeps
- * focus so arrows/Enter/Escape drive the list.
+ * focus so arrows/Enter/Escape drive the list. Placement is plugin-owned
+ * (`useAnchoredPanelPosition`): the host's anchored-position helper was
+ * removed, so vendoring it keeps the picker working across host releases.
  *
  * @module sub2api-sync/client/section/GroupPicker
  */
@@ -21,9 +23,9 @@ import {
   Input,
   MenuSurface,
   useAnchoredMaxHeight,
-  useAnchoredPosition,
   useDismissOnOutsidePointer,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useAnchoredPanelPosition } from '../usePanelPosition.ts'
 import type { GroupsView } from '../../routes.ts'
 
 /** Design cap for the panel; the viewport clamp never exceeds it. */
@@ -61,7 +63,7 @@ export function GroupPicker({ groups, value, placeholder, searchPlaceholder, emp
     return groups.filter((group) => group.name.toLowerCase().includes(needle))
   }, [groups, filter])
 
-  const position = useAnchoredPosition({
+  const position = useAnchoredPanelPosition({
     open,
     anchorRef: triggerRef,
     panelRef,
@@ -157,8 +159,8 @@ export function GroupPicker({ groups, value, placeholder, searchPlaceholder, emp
           className="s2s-groupPanel"
           role="listbox"
           // maxHeight applies from the first paint (even while unpositioned):
-          // useAnchoredPosition measures the panel's offsetHeight to clamp its
-          // placement, and an uncapped first measure (search + every option)
+          // useAnchoredPanelPosition measures the panel's offsetHeight to clamp
+          // its placement, and an uncapped first measure (search + every option)
           // would shove the panel against the viewport top for a frame before
           // the ResizeObserver re-fit converges.
           style={{
